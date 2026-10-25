@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixel Mandala</title>
+<style>
+  :root { --bg: #0b0f1c; }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
+  body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas {
+    height: min(96vh, calc(96vw * 1.25));
+    aspect-ratio: 360 / 450;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    box-shadow: 0 0 60px rgba(90, 120, 255, .25);
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<canvas id="c" title="click / space to pause"></canvas>
+<script>
+const W = 360, H = 450, CX = 180;
+const canvas = document.getElementById('c');
+canvas.width = W; canvas.height = H;
+const ctx = canvas.getContext('2d');
+const img = ctx.createImageData(W, H);
+const B = img.data;
+let T = B; // current draw target
+
+// ---------- utils ----------
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const lerp = (a, b, k) => a + (b - a) * k;
+const lerpC = (a, b, k) => [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const smooth = (a, b, v) => { const k = clamp((v - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); };
+const mod = (a, n) => ((a % n) + n) % n;
+
+function h2(x, y) {
+  let n = (Math.imul(x, 374761393) + Math.imul(y, 668265263)) | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = h2(xi, yi), b = h2(xi + 1, yi), c = h2(xi, yi + 1), d = h2(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+const fbm = (x, y) => vnoise(x, y) * .5 + vnoise(x * 2.1, y * 2.1) * .3 + vnoise(x * 4.3, y * 4.3) * .2;
+
+function mix(x, y, c, a) {
+  x |= 0; y |= 0;
+  if (x < 0 || y < 0 || x >= W || y >= H || a <= 0) return;
+  const i = (y * W + x) << 2;
+  if (a >= 1) { T[i] = c[0]; T[i + 1] = c[1]; T[i + 2] = c[2]; return; }
+  T[i] += (c[0] - T[i]) * a; T[i + 1] += (c[1] - T[i + 1]) * a; T[i + 2] += (c[2] - T[i + 2]) * a;
+}
+const put = (x, y, c) => mix(x, y, c, 1);
+
+function line(x0, y0, x1, y1, c, a) {
+  x0 = Math.round(x0); y0 = Math.round(y0); x1 = Math.round(x1); y1 = Math.round(y1);
+  const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1, dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (let n = 0; n < 2000; n++) {
+    mix(x0, y0, c, a);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => v / 16 - .5);
+
+// ---------- palette ----------
+const C = {
+  ink: hex('#07070d'), inkRim: hex('#2a2f48'), shine: hex('#c8d0e8'), gold: hex('#ffe9a8'),
+  navy: hex('#13205e'), deep: hex('#0d1640'), white: hex('#f4f6ff'),
+  ley: hex('#f2e85a'), feather0: hex('#7a82a2'), feather1: hex('#cdd3e4'), feather2: hex('#f6f8fd'),
+  purple: hex('#6d4fc0'), purpleLt: hex('#c9a6ff'), purpleDk: hex('#3a2a8a'), purpleEdge: hex('#a07ae8'),
+  pink: hex('#e07ab8'), pinkLt: hex('#f6aed2'), pinkDk: hex('#7d2f6e'),
+  blue: hex('#2b55c8'), teal: hex('#4fe0c8'), firefly: hex('#fff6a0'), mist: hex('#e2e8ff'),
+};
+const RAIN = ['#c9f2e2', '#9fe3d8', '#bfe9f5', '#d2c4f5', '#b9a6ec', '#f0f4ff', '#f3c6dc', '#86c9ee', '#5fd3be', '#e8f7b0', '#a8b8f4'].map(hex);
+const TILE = ['#2fd3c0', '#1e48c8', '#8f5ae6', '#f39a3c', '#3bb6f0', '#5ee08a', '#e75fa8'].map(hex);
+const CIRC = ['#1d47c9', '#f08d2e', '#9b52e0', '#e9f4ff', '#1f2e7a', '#ffd84a'].map(hex);
+const GEM_TOP = ['#e8fff0', '#bff7c8', '#7fe8a0', '#3fc78a', '#9af0d0'].map(hex);
+const GEM_BOT = ['#ffd0e0', '#ff7fa8', '#ff4f88', '#5fd6d6', '#2a9fc0'].map(hex);
+const GEM_SIDE = ['#ff9ae8', '#ff5fd0', '#c040e0', '#7a3ae0', '#3a6af0'].map(hex);
+const SILVER = ['#5d6582', '#aeb6cc', '#e4e8f2', '#8a92ac'].map(hex);
+
+// ---------- sprites: natural & mystical glyphs ----------
+const SPR = {
+  moon:  { c: ['#2c3fb8', '#f0c040'], p: ['..aaa..', '.aab...', 'aab....', 'aab....', 'aab....', '.aab...', '..aaa..'] },
+  star:  { c: ['#d08a10', '#fff2a0'], p: ['...a...', '...a...', '.a.a.a.', 'aaabaaa', '.a.a.a.', '...a...', '...a...'] },
+  sun:   { c: ['#f08a20', '#ffd030'], p: ['a..a..a', '.aaaaa.', '.abbba.', 'aabbbaa', '.abbba.', '.aaaaa.', 'a..a..a'] },
+  lotus: { c: ['#d04090', '#f5a0c8'], p: ['...a...', '..aba..', 'a.aba.a', 'aa.a.aa', '.aaaaa.', '..bbb..', '.......'] },
+  leaf:  { c: ['#1f8a50', '#7ad890'], p: ['....aa.', '...aba.', '..aba..', '.aba...', '.ba....', 'b......', '.......'] },
+  flame: { c: ['#e0502a', '#ffc040'], p: ['...a...', '..aa...', '..aba..', '.abba..', '.abbba.', '.abbba.', '..aaa..'] },
+  tree:  { c: ['#2a8a5a', '#7a4a2a'], p: ['..aaa..', '.aaaaa.', 'aaaaaaa', '.aaaaa.', '...b...', '...b...', '..bbb..'] },
+};
+for (const k in SPR) SPR[k].c = SPR[k].c.map(hex);
+function sprite(s, x, y, flip, glow) {
+  const p = s.p;
+  for (let r = 0; r < 7; r++) for (let q = 0; q < 7; q++) {
+    const ch = p[r][flip ? 6 - q : q];
+    if (ch === '.') continue;
+    const col = ch === 'a' ? s.c[0] : s.c[1];
+    put(x + q, y + r, glow ? lerpC(col, C.white, glow) : col);
+  }
+}
+
+// ---------- static background: sky, clouds, mountains, forest ----------
+const bgData = new Uint8ClampedArray(W * H * 4);
+(function buildBackground() {
+  T = bgData;
+  const R = rng(11);
+  const stops = [[0, '#0e2a78'], [140, '#1f4fb8'], [250, '#5a82d8'], [300, '#a9b4e6'], [338, '#e6c4cf']].map(s => [s[0], hex(s[1])]);
+  for (let y = 0; y < H; y++) {
+    let c = stops[stops.length - 1][1];
+    for (let s = 0; s < stops.length - 1; s++) {
+      if (y >= stops[s][0] && y < stops[s + 1][0]) { c = lerpC(stops[s][1], stops[s + 1][1], (y - stops[s][0]) / (stops[s + 1][0] - stops[s][0])); break; }
+    }
+    for (let x = 0; x < W; x++) {
+      const d = BAYER[(y & 3) * 4 + (x & 3)] * 10;
+      const i = (y * W + x) << 2;
+      T[i] = Math.floor((c[0] + d) / 6) * 6; T[i + 1] = Math.floor((c[1] + d) / 6) * 6; T[i + 2] = Math.floor((c[2] + d) / 6) * 6; T[i + 3] = 255;
+    }
+  }
+  // peach clouds drifting on the horizon
+  const cTop = hex('#fbe6cc'), cBot = hex('#e9a89c'), cRim = hex('#cdb6e6');
+  for (let y = 262; y < 348; y++) for (let x = 0; x < W; x++) {
+    const w = smooth(30, 120, Math.abs(x - CX)) * (x > CX ? 1 : .8);
+    const v = fbm(x * .022, y * .09) - .5 + (w - 1) * .45;
+    if (v > 0) mix(x, y, v < .025 ? cRim : lerpC(cTop, cBot, (y - 262) / 86), clamp(v * 9, .4, .95));
+  }
+  // far snowy mountains
+  const ridge1 = x => 336 - 54 * Math.exp(-(((x - 46) / 30) ** 2)) - 30 * Math.exp(-(((x - 306) / 34) ** 2))
+    - 16 * Math.exp(-(((x - 214) / 45) ** 2)) - 12 * Math.exp(-(((x - 128) / 30) ** 2)) - fbm(x * .08, 3) * 10;
+  const lit = hex('#7b97e6'), shd = hex('#3b5cc0'), snowL = hex('#f3f6ff'), snowS = hex('#b9c8f0'), haze = hex('#9fb2e8');
+  for (let x = 0; x < W; x++) {
+    const r = Math.round(ridge1(x)), facingLeft = ridge1(x + 1) - ridge1(x - 1) < 0;
+    const snowLine = 316 + vnoise(x * .2, 0) * 10;
+    for (let y = r; y < 366; y++) {
+      const n = vnoise(x * .6, y * .08);
+      let c = facingLeft ? lit : shd;
+      if (n > .62) c = lerpC(c, snowS, .35);
+      if (y < snowLine && vnoise(x * .7, y * .1) > .32) c = facingLeft ? snowL : snowS;
+      put(x, y, lerpC(c, haze, clamp((y - r) / 50, 0, 1) * .3));
+    }
+  }
+  // nearer rolling hills
+  const hill = hex('#2b4bb0'), hillDk = hex('#1d3790'), rim = hex('#5b82dc');
+  for (let x = 0; x < W; x++) {
+    const r = Math.round(357 + 5 * Math.sin(x * .035) + 4 * Math.sin(x * .083 + 2) - fbm(x * .05, 9) * 9);
+    put(x, r, rim);
+    for (let y = r + 1; y < 400; y++) put(x, y, lerpC(hill, hillDk, (y - r) / 40));
+  }
+  for (let y = 348; y < 376; y++) {
+    const a = .28 * Math.sin(Math.PI * (y - 348) / 28);
+    for (let x = 0; x < W; x++) mix(x, y, C.mist, a * (.6 + .4 * vnoise(x * .05, y * .2)));
+  }
+  // pine forest
+  function pine(x, base, h, c, hl, tip) {
+    for (let k = 0; k < h; k++) {
+      const y = base - h + k;
+      let hw = Math.floor(k * .36) - ((k % 4) === 0 && k > 2 ? 1 : 0);
+      if (hw < 0) hw = 0;
+      for (let dx = -hw; dx <= hw; dx++) put(x + dx, y, hl && dx === -hw && k > 1 ? hl : c);
+    }
+    if (tip) put(x, base - h, tip);
+    put(x, base, c); put(x, base + 1, c);
+  }
+  for (let x = -4; x < W + 4; x += 3 + Math.floor(R() * 4)) pine(x, 392 + Math.round(vnoise(x * .1, 1) * 5), 8 + Math.floor(R() * 11), hex('#1c3a8a'), hex('#2f53a8'));
+  for (let y = 398; y < 406; y++) for (let x = 0; x < W; x++) put(x, y, hex('#0a1838'));
+  for (let x = -4; x < W + 4; x += 4 + Math.floor(R() * 5)) pine(x, 404, 12 + Math.floor(R() * 19), hex('#0c1d4a'), hex('#1d5576'), R() < .3 ? hex('#2f8f9a') : null);
+  T = B;
+})();
+
+// ---------- precomputed animated layers ----------
+const PL = 256;
+const rain = [];
+(function buildRain() {
+  const R = rng(3);
+  for (let x = 0; x < W; x++) {
+    const pat = new Uint8Array(PL), dens = x % 2 === 0 ? .8 : .45;
+    let p = 0;
+    while (p < PL) {
+      if (R() < dens) { const len = 1 + Math.floor(R() * 5), ci = 1 + Math.floor(R() * RAIN.length); for (let k = 0; k < len && p < PL; k++) pat[p++] = ci; p++; }
+      else p += 1 + Math.floor(R() * 3);
+    }
+    let end = 268 + Math.floor(fbm(x * .07, 5) * 50 + R() * 18);
+    if (R() < .1) end += 30 + Math.floor(R() * 30);
+    rain.push({ pat, end, sp: R() < .25 ? 0 : 6 + R() * 22, ph: R() * PL, a: x % 2 === 0 ? .85 : .6 });
+  }
+})();
+
+// big diamond circuit-maze (one quadrant, mirrored four ways)
+const BR = 46, BCX = CX, BCY = 153;
+const circ = new Uint8Array((BR + 1) * (BR + 1));
+(function buildCircuit() {
+  const R = rng(42), CELL = 4, n = Math.ceil((BR + 1) / CELL);
+  for (let gy = 0; gy < n; gy++) for (let gx = 0; gx < n; gx++) {
+    const top = R() < .5, left = R() < .5, dot = R() < .3, col = 1 + Math.floor(R() * CIRC.length);
+    for (let ly = 0; ly < CELL; ly++) for (let lx = 0; lx < CELL; lx++) {
+      const dx = gx * CELL + lx, dy = gy * CELL + ly;
+      if (dx > BR || dy > BR) continue;
+      if ((top && ly === 0) || (left && lx === 0) || (dot && lx === 2 && ly === 2)) circ[dy * (BR + 1) + dx] = col;
+    }
+  }
+})();
+
+const stars = Array.from({ length: 70 }, (_, i) => ({ x: Math.floor(h2(i, 1) * W), y: Math.floor(h2(i, 2) * 300), ph: h2(i, 3) * 6.28, sp: 1 + h2(i, 4) * 3 }));
+const fireflies = Array.from({ length: 34 }, (_, i) => ({ x: h2(i, 7) * W, y: 330 + h2(i, 8) * 72, ph: h2(i, 9) * 6.28, sp: .6 + h2(i, 10) }));
+
+const waterfall = [];
+for (let dx = -22; dx <= 22; dx++) {
+  waterfall.push({ dx, tip: Math.round(305 + (22 - Math.abs(dx)) * 4 + h2(dx + 50, 3) * 12), ph: h2(dx + 50, 4) * 26 });
+}
+
+const GLYPHS = Array.from({ length: 24 }, (_, i) => Array.from({ length: 15 }, (_, k) => h2(i * 31 + k, 77) < .45 ? 1 : 0));
+const runeSlots = Array.from({ length: 12 }, (_, i) => i);
+
+// ---------- drawing pieces ----------
+const BEAD = ['.XXX.', 'XHXXX', 'XXXXX', 'XXXXr', '.XrX.'];
+let beadIdx = 0;
+function bead(x, y, t) {
+  const i = beadIdx++;
+  const glint = mod(i * .29 - t * 1.4, 7) < .35;
+  for (let r = 0; r < 5; r++) for (let q = 0; q < 5; q++) {
+    const ch = BEAD[r][q];
+    if (ch === '.') continue;
+    put(x + q - 2, y + r - 2, ch === 'X' ? C.ink : ch === 'r' ? C.inkRim : glint ? C.gold : C.shine);
+  }
+}
+function beadPath(pts, t, spacing = 4) {
+  for (let s = 0; s < pts.length - 1; s++) {
+    const [x0, y0] = pts[s], [x1, y1] = pts[s + 1];
+    const n = Math.max(1, Math.round(Math.hypot(x1 - x0, y1 - y0) / spacing));
+    for (let k = 0; k < n; k++) bead(Math.round(lerp(x0, x1, k / n)), Math.round(lerp(y0, y1, k / n)), t);
+  }
+}
+const diamondPts = (cx, cy, r) => [[cx, cy - r], [cx + r, cy], [cx, cy + r], [cx - r, cy], [cx, cy - r]];
+
+function fringe(cx, cy, r, t, n, seed) {
+  for (let k = 0; k < n; k++) {
+    const th = k / n * Math.PI * 2;
+    const rr = r / (Math.abs(Math.cos(th)) + Math.abs(Math.sin(th)));
+    const a = th + Math.sin(t * 1.5 + k * .7) * .15;
+    const len = 3 + h2(k, seed) * 6 + Math.sin(t * 2 + k) * 1.5;
+    const x0 = cx + Math.cos(th) * rr, y0 = cy + Math.sin(th) * rr;
+    line(x0, y0, x0 + Math.cos(a) * len, y0 + Math.sin(a) * len, C.ink, .85);
+  }
+}
+
+function feathers(t) {
+  const L = BR + 8;
+  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    const mx = BCX + sx * L / 2, my = BCY + sy * L / 2, base = Math.atan2(sy, sx);
+    const N = sy < 0 ? 38 : 26, maxLen = sy < 0 ? 40 : 26;
+    for (let k = 0; k < N; k++) {
+      const s = (k / (N - 1) - .5) * 1.6;
+      const px = mx + s * sx * L / 2, py = my - s * sy * L / 2;
+      const seed = k + (sx + 2) * 100 + (sy + 2) * 1000;
+      const a = base + (h2(seed, 5) - .5) * .9 + Math.sin(t * 1.3 + k * .4) * .08;
+      const len = 12 + h2(seed, 6) * maxLen;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      for (let i = 0; i < len; i++) {
+        const f = i / len;
+        const c = f < .5 ? lerpC(C.feather0, C.feather1, f * 2) : lerpC(C.feather1, C.feather2, (f - .5) * 2);
+        const x = px + ca * i, y = py + sa * i;
+        mix(x, y, c, .9);
+        if (i % 3 === 0 && f > .2) mix(x - sa, y + ca, c, .45);
+      }
+    }
+  }
+}
+
+function tile(cx, cy, r, t, seed, spr, flip) {
+  for (let dy = -r; dy <= r; dy++) {
+    const w = r - Math.abs(dy);
+    for (let dx = -w; dx <= w; dx++) {
+      const ax = Math.abs(dx), ay = Math.abs(dy), edge = r - ax - ay, m = Math.max(ax, ay);
+      let c;
+      if (edge < 1) c = C.navy;
+      else if (spr && m <= 4) c = C.white;
+      else if (!spr && m <= 1) c = TILE[mod(seed + Math.floor(t * 3), 7)];
+      else if (m <= r * .5) c = m % 3 === 0 ? C.deep : TILE[mod((m >> 1) - Math.floor(t * 2) + seed, 7)];
+      else c = TILE[mod((edge >> 1) + Math.floor(t * 1.3) + seed + 3, 7)];
+      put(cx + dx, cy + dy, c);
+    }
+  }
+  if (spr) sprite(spr, cx - 3, cy - 3, flip, Math.max(0, Math.sin(t * 1.7 + seed)) * .35);
+}
+
+function gem(cx, cy, r, t, pal) {
+  const sheenPos = Math.floor(t * 40);
+  const inner = (r - 6) * .7;
+  for (let dy = -r; dy <= r; dy++) {
+    const w = r - Math.abs(dy);
+    for (let dx = -w; dx <= w; dx++) {
+      const ax = Math.abs(dx), ay = Math.abs(dy), d = ax + ay, edge = r - d, m = Math.max(ax, ay);
+      let c;
+      if (edge < 1) c = C.ink;
+      else if (edge < 5) {
+        c = SILVER[edge - 1];
+        if (mod(dx - dy + sheenPos, 80) < 5) c = C.white;
+      } else if (edge < 6) c = C.deep;
+      else if (m <= inner) {
+        c = m < 2 ? C.white : pal[mod((m >> 1) - Math.floor(t * 4), pal.length)];
+        if (m === Math.floor(inner)) c = C.deep;
+      } else c = (d & 1) ? hex('#7d8fc0') : hex('#a8b8e0');
+      put(cx + dx, cy + dy, c);
+    }
+  }
+}
+
+function bigDiamond(t) {
+  const wave = mod(t * 22, BR + 24);
+  const base0 = hex('#35b096'), base1 = hex('#2fa48e'), guide = hex('#1a3f9a'), rimC = hex('#7fe0ff');
+  for (let dy = -BR; dy <= BR; dy++) {
+    const ay = Math.abs(dy), w = BR - ay;
+    for (let dx = -w; dx <= w; dx++) {
+      const ax = Math.abs(dx), d = ax + ay, edge = BR - d;
+      let c;
+      if (edge < 2) c = C.deep;
+      else if (edge < 4) c = lerpC(rimC, C.white, .5 + .5 * Math.sin(t * 3 + (dx + dy) * .2));
+      else {
+        const v = circ[ay * (BR + 1) + ax];
+        if (v) c = CIRC[mod(v - 1 + Math.floor(t * 1.5 - d / 8), CIRC.length)];
+        else c = d % 12 === 0 ? guide : ((d >> 2) & 1) ? base0 : base1;
+        const pd = Math.abs(d - wave);
+        if (pd < 2) c = lerpC(c, C.white, v ? .7 : .35);
+      }
+      put(BCX + dx, BCY + dy, c);
+    }
+  }
+  // center: a moon cycling through its phases
+  const p = mod(t * .06, 1), k = Math.cos(p * Math.PI * 2);
+  for (let dy = -10; dy <= 10; dy++) for (let dx = -10; dx <= 10; dx++) {
+    const rr = Math.hypot(dx, dy);
+    if (rr <= 9.5) put(BCX + dx, BCY + dy, rr > 8.5 ? C.ink : hex('#0b1440'));
+    if (rr <= 6.2) {
+      const nx = dx / 6.2, ny = dy / 6.2, half = Math.sqrt(Math.max(0, 1 - ny * ny));
+      const litPx = p < .5 ? nx > k * half : nx < -k * half;
+      put(BCX + dx, BCY + dy, litPx ? hex('#f6f0c8') : hex('#26306a'));
+    }
+  }
+  const tw = .5 + .5 * Math.sin(t * 3);
+  sprite(SPR.star, BCX - 15, BCY - 27, false, tw * .6);
+  sprite(SPR.star, BCX + 9, BCY - 27, false, (1 - tw) * .6);
+  sprite(SPR.leaf, BCX - 15, BCY + 20, true, 0);
+  sprite(SPR.leaf, BCX + 9, BCY + 20, false, 0);
+  sprite(SPR.lotus, BCX - 3, BCY + 30, false, .3 + .3 * Math.sin(t * 2));
+  sprite(SPR.sun, BCX - 3, BCY - 38, false, .3 + .3 * Math.sin(t * 2 + 1));
+}
+
+function pillars(t) {
+  const both = (d, fn) => { fn(CX - d); fn(CX + d); };
+  const beadCols = [{ d: 42, y0: 0, y1: 92 }, { d: 86, y0: 0, y1: 122 }, { d: 100, y0: 0, y1: 122 }, { d: 34, y0: 305, y1: 395 }];
+  for (const p of beadCols) both(p.d, x => {
+    const off = Math.floor(t * 8);
+    for (let y = p.y0; y < p.y1; y++) {
+      for (let q = -3; q <= 3; q++) mix(x + q, y, Math.abs(q) === 3 ? C.purpleEdge : C.purple, .8);
+      const ry = mod(y + off, 7);
+      if (ry < 5) for (let q = -2; q <= 2; q++) {
+        const ring = (ry === 0 || ry === 4) ? Math.abs(q) < 2 : Math.abs(q) === 2;
+        if (ring) put(x + q, y, C.purpleLt);
+        else if (ry === 2 && q === 0) put(x, y, C.purpleDk);
+      }
+    }
+  });
+  const ladders = [{ d: 96, y0: 200, y1: 392 }, { d: 52, y0: 312, y1: 372 }];
+  for (const p of ladders) both(p.d, x => {
+    const off = Math.floor(t * 5);
+    for (let y = p.y0; y < p.y1; y++) {
+      const r = mod(y - off, 4);
+      for (let q = -4; q <= 4; q++) mix(x + q, y, r === 3 ? C.pinkDk : (r === 0 && Math.abs(q) < 3) ? C.pinkLt : C.pink, .85);
+    }
+  });
+  both(152, x => {
+    for (let y = 40; y < 330; y++) {
+      for (let q = -3; q <= 3; q++) mix(x + q, y, C.blue, .85);
+      const r = mod(y - Math.floor(t * 3), 10);
+      const hw = r < 5 ? r : 9 - r;
+      if (hw <= 3) { put(x - hw, y, C.teal); put(x + hw, y, C.teal); }
+    }
+  });
+  // runic glyph rows that slowly rewrite themselves
+  const slot = Math.floor(t / 1.2);
+  runeSlots.forEach((s, i) => {
+    const g = GLYPHS[(i * 7 + Math.floor((slot + i * 5) / 12) * 3) % GLYPHS.length];
+    const side = i < 6 ? -1 : 1, j = i % 6;
+    const gx = side < 0 ? CX - 152 + (j % 3) * 4 : CX + 141 + (j % 3) * 4, gy = j < 3 ? 116 : 186;
+    for (let k = 0; k < 15; k++) if (g[k]) put(gx + k % 3, gy + Math.floor(k / 3), C.white);
+  });
+}
+
+const LEY = [
+  [[0, 40], [CX, BCY]], [[30, 0], [150, 300]], [[0, 330], [CX, 292]], [[60, 450], [CX - 10, 262]],
+  [[0, 200], [120, 420]], [[0, 110], [CX - 20, 30]], [[90, 0], [10, 260]],
+];
+function leyLines(t) {
+  const a = .4 + .2 * Math.sin(t * 1.2);
+  LEY.forEach(([p, q], i) => {
+    const j = Math.sin(t * .4 + i) * 6, k = Math.cos(t * .33 + i * 2) * 6;
+    line(p[0] + j, p[1] + k, q[0] - k, q[1] + j, C.ley, a);
+    line(W - 1 - p[0] - j, p[1] + k, W - 1 - q[0] + k, q[1] + j, C.ley, a);
+  });
+  line(0, 362 + Math.sin(t * .5) * 8, W, 300, C.ley, a * .8);
+  line(0, 250, W, 424 + Math.sin(t * .6) * 8, C.ley, a * .8);
+}
+
+function crystalFalls(t) {
+  for (let x = CX - 26; x <= CX + 26; x++) for (let y = 290; y < 294; y++) {
+    put(x, y, mod(x - Math.floor(t * 30), 40) < 3 ? C.white : SILVER[(y - 290) % 4]);
+  }
+  for (let x = CX - 24; x <= CX + 24; x += 4) for (let y = 284 + (x & 4 ? 2 : 0); y < 290; y++) put(x, y, y < 287 ? hex('#cfe9ff') : SILVER[1]);
+  const dark = hex('#4a5878'), light = hex('#e2eaf6'), ice = hex('#bfe6ff'), tipC = hex('#cfe9ff');
+  for (const s of waterfall) {
+    const x = CX + s.dx, shade = Math.cos(s.dx / 24 * Math.PI / 2) * .8 + ((s.dx & 1) ? 0 : .15);
+    for (let y = 294; y <= s.tip; y++) {
+      let c = lerpC(dark, light, clamp(shade, 0, 1));
+      const f = mod(y - t * 45 + s.ph, 26);
+      if (f < 2) c = C.white; else if (f < 5) c = lerpC(c, ice, .5);
+      if ((y - 294) % 20 === 0) c = lerpC(c, dark, .5);
+      if (y > s.tip - 3) c = tipC;
+      mix(x, y, c, .92);
+    }
+    const fall = 410 - s.tip;
+    if (fall > 3 && (s.dx & 1)) {
+      const pos = mod(t * 70 + s.ph * 3, fall + 30);
+      if (pos < fall) { put(x, s.tip + pos, hex('#e8f6ff')); mix(x, s.tip + pos - 1, ice, .6); mix(x, s.tip + pos - 2, ice, .3); }
+    }
+  }
+  for (let k = 0; k < 3; k++) {
+    const r = mod(t * 12 + k * 8, 24), a = (1 - r / 24) * .5;
+    for (let ang = 0; ang < Math.PI * 2; ang += .05) mix(CX + Math.cos(ang) * r * 2.2, 413 + Math.sin(ang) * r * .5, C.white, a);
+  }
+}
+
+// ---------- frame ----------
+const glitch = { until: 0, y0: 0, h: 0, dx: 0 };
+const rowTmp = new Uint8ClampedArray(W * 4);
+
+function frame(t) {
+  B.set(bgData);
+  beadIdx = 0;
+
+  // lake reflection
+  const lakeDark = hex('#0a1a48');
+  for (let y = 406; y < H; y++) {
+    const k = y - 406, src = 404 - k, off = Math.round(Math.sin(y * .7 + t * 2) * (1 + k * .05));
+    for (let x = 0; x < W; x++) {
+      const sx = clamp(x + off, 0, W - 1), si = (src * W + sx) << 2, i = (y * W + x) << 2;
+      B[i] = bgData[si] * .55 + lakeDark[0] * .45; B[i + 1] = bgData[si + 1] * .55 + lakeDark[1] * .45; B[i + 2] = bgData[si + 2] * .55 + lakeDark[2] * .45;
+      if (h2(x >> 1, y * 13 + Math.floor(t * 5)) > .985) mix(x, y, C.white, .6);
+    }
+  }
+  // drifting mist over the hills
+  for (let y = 340; y < 374; y++) {
+    const prof = Math.sin(Math.PI * (y - 340) / 34);
+    for (let x = 0; x < W; x++) mix(x, y, C.mist, .22 * prof * fbm((x + t * 6) * .04, y * .15));
+  }
+  for (const s of stars) mix(s.x, s.y, C.white, .5 + .5 * Math.sin(t * s.sp + s.ph));
+
+  // falling pixel rain
+  for (let x = 0; x < W; x++) {
+    const col = rain[x], off = Math.floor(t * col.sp + col.ph), end = col.end, pat = col.pat;
+    for (let y = 0; y < end; y++) {
+      const ci = pat[mod(y - off, PL)];
+      if (!ci) continue;
+      const a = y < end - 45 ? col.a : col.a * (end - y) / 45, c = RAIN[ci - 1], i = (y * W + x) << 2;
+      B[i] += (c[0] - B[i]) * a; B[i + 1] += (c[1] - B[i + 1]) * a; B[i + 2] += (c[2] - B[i + 2]) * a;
+    }
+  }
+
+  feathers(t);
+  pillars(t);
+  leyLines(t);
+
+  // beaded frames
+  beadPath(diamondPts(BCX, BCY, BR + 4), t);
+  beadPath(diamondPts(BCX, BCY, BR + 8), t);
+  beadPath([[CX, 83], [CX, 99]], t);
+  beadPath([[CX, 207], [CX, 236]], t);
+  for (const s of [-1, 1]) {
+    beadPath([[CX + s * 60, 230], [CX + s * 74, 230], [CX + s * 74, 300], [CX + s * 30, 300]], t);
+    beadPath([[CX + s * 128, 108], [CX + s * 106, 129]], t);
+    beadPath([[CX + s * 106, 177], [CX + s * 128, 198]], t);
+    for (let k = 0; k < 3; k++) {
+      beadPath(diamondPts(CX + s * 128, 30 + k * 32, 17), t);
+      beadPath(diamondPts(CX + s * 128, 212 + k * 32, 17), t);
+    }
+    beadPath(diamondPts(CX + s * 106, 153, 27), t);
+  }
+  beadPath(diamondPts(CX, 50, 33), t);
+  beadPath(diamondPts(CX, 262, 29), t);
+  fringe(CX, 50, 36, t, 64, 1);
+  fringe(CX, 262, 32, t, 54, 2);
+  fringe(CX - 106, 153, 30, t, 44, 3);
+  fringe(CX + 106, 153, 30, t, 44, 4);
+
+  // jewels
+  bigDiamond(t);
+  for (let k = -3; k <= 3; k++) {
+    tile(CX - 60, BCY + k * 22, 10, t, k + 3, null);
+    tile(CX + 60, BCY + k * 22, 10, t, 3 - k, null);
+  }
+  const upper = [SPR.moon, SPR.star, SPR.sun], lower = [SPR.lotus, SPR.leaf, SPR.flame];
+  for (let k = 0; k < 3; k++) {
+    tile(CX - 128, 30 + k * 32, 14, t, k * 2, upper[k], false);
+    tile(CX + 128, 30 + k * 32, 14, t, k * 2, upper[k], true);
+    tile(CX - 128, 212 + k * 32, 14, t, k * 2 + 1, lower[k], false);
+    tile(CX + 128, 212 + k * 32, 14, t, k * 2 + 1, lower[k], true);
+  }
+  gem(CX, 50, 30, t, GEM_TOP);
+  gem(CX, 262, 26, t, GEM_BOT);
+  gem(CX - 106, 153, 24, t, GEM_SIDE);
+  gem(CX + 106, 153, 24, t, GEM_SIDE);
+  sprite(SPR.tree, CX - 3, 259, false, .2 + .2 * Math.sin(t * 1.5));
+
+  crystalFalls(t);
+
+  for (const f of fireflies) {
+    const x = f.x + Math.sin(t * .5 * f.sp + f.ph) * 12, y = f.y + Math.sin(t * .7 * f.sp + f.ph * 2) * 6;
+    const b = Math.max(0, Math.sin(t * 2 * f.sp + f.ph));
+    mix(x, y, C.firefly, b);
+    mix(x + 1, y, C.firefly, b * .35); mix(x - 1, y, C.firefly, b * .35); mix(x, y + 1, C.firefly, b * .35); mix(x, y - 1, C.firefly, b * .35);
+  }
+
+  // black beaded edge bars
+  for (const [y0, y1] of [[14, 152], [172, 332]]) for (let y = y0; y < y1; y += 4) {
+    bead(6, y, t); bead(10, y + 2, t);
+    bead(W - 7, y, t); bead(W - 11, y + 2, t);
+  }
+
+  // occasional horizontal glitch slip
+  if (t > glitch.until && Math.random() < .008) {
+    glitch.y0 = Math.floor(Math.random() * (H - 20)); glitch.h = 3 + Math.floor(Math.random() * 12);
+    glitch.dx = (Math.random() < .5 ? -1 : 1) * (3 + Math.floor(Math.random() * 10)); glitch.until = t + .12 + Math.random() * .15;
+  }
+  if (t < glitch.until) {
+    for (let y = glitch.y0; y < glitch.y0 + glitch.h; y++) {
+      rowTmp.set(B.subarray(y * W * 4, (y + 1) * W * 4));
+      for (let x = 0; x < W; x++) {
+        const sx = mod(x - glitch.dx, W), i = (y * W + x) << 2;
+        B[i] = rowTmp[mod(sx - 2, W) * 4]; B[i + 1] = rowTmp[sx * 4 + 1]; B[i + 2] = rowTmp[sx * 4 + 2];
+      }
+    }
+  }
+
+  ctx.putImageData(img, 0, 0);
+}
+
+let paused = false, last = performance.now(), clock = 0;
+function loop(now) {
+  if (!paused) clock += Math.min(.1, (now - last) / 1000);
+  last = now;
+  if (!paused) frame(clock);
+  requestAnimationFrame(loop);
+}
+const toggle = () => { paused = !paused; };
+canvas.addEventListener('click', toggle);
+addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); toggle(); } });
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
