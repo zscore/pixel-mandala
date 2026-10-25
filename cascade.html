@@ -470,7 +470,8 @@ const rasterVessel = V => raster(V.x, V.y, V.ang, Math.hypot(V.hw + 1, V.depth +
 
 // big basin at the bottom: rocks on its own, then tips one way and pours, then the other
 const CUP = vessel({ x: CX, y: 334 + DY, hw: 32, depth: 14, qin: 3.2, qout: 4, vol: 240 });
-// center shuttle: slides back and forth under the curtain, throwing it left and right
+// center shuttle: hangs from the chain's top run, so the chained buckets slide it back and forth
+// under the curtain, throwing the water left and right
 const SHUTTLE = { y: 318, hw: 18, reach: 66 };
 // seesaw: two buckets on a beam; the heavier side sinks, tips its bucket out and pours
 const SEE = { x: CX, y: 404, L: 52, th: 0, w: 0 };
@@ -488,8 +489,10 @@ const BOWLS = [-1, 1].map(s => vessel({ x: s < 0 ? 93 : MX(93), y: 274, hw: 10, 
 const WHEELS = [-1, 1].map(s => ({ s, x: s < 0 ? 100 : MX(100), y: 458, r: 22, n: 6, a: 0, w: 0 }));
 // chained buckets: one chain over two pulleys, a bucket on each end under the outer falls.
 // The heavier one sinks and hauls the other up; at the bottom it hits a stop, tips out, and goes light.
-const CHAIN = { top: 300, y0: 336, travel: 200, pos: 0, v: 0 }; // pos: how far the left bucket has sunk
-CHAIN.B = [-1, 1].map(s => ({ s, x: s < 0 ? 22 : MX(22), V: vessel({ hw: 11, depth: 14, qin: 7, qout: 30 }) }));
+// Each drips from a hole in its floor, faster the fuller it is, so its level follows how much water
+// it's catching, and the uneven surges of the two outer falls keep changing which side is heavier.
+const CHAIN = { top: 300, y0: 336, travel: 200, pos: 100, v: 0 }; // pos: how far the left bucket has sunk
+CHAIN.B = [-1, 1].map(s => ({ s, x: s < 0 ? 22 : MX(22), V: vessel({ hw: 11, depth: 14, qin: 7, qout: 30, drain: .14 }) }));
 const chainY = c => CHAIN.y0 + (c.s < 0 ? CHAIN.pos : CHAIN.travel - CHAIN.pos);
 
 const wheelShape = (r, n) => (u, v) => {
@@ -509,7 +512,7 @@ function stand(x, y, y1, hw) { // a little A-frame from an axle down to the grou
   line(x, y, x - hw, y1, C.inkRim); line(x, y, x + hw, y1, C.inkRim); line(x - hw - 2, y1, x + hw + 2, y1, C.stone1);
 }
 function placeMachines(t) {
-  pose.shuttle = CX + SHUTTLE.reach * clamp(1.35 * Math.sin(t * .55), -1, 1);
+  pose.shuttle = CX + (CHAIN.travel / 2 - CHAIN.pos) / (CHAIN.travel / 2) * SHUTTLE.reach; // the top run moves toward the sinking side
   const ca = Math.cos(SEE.th), sa = Math.sin(SEE.th);
   for (const [V, s] of [[SEE.A, -1], [SEE.B, 1]]) { V.x = SEE.x + s * SEE.L * ca; V.y = SEE.y + s * SEE.L * sa - 1; V.ang = SEE.th * 2.1; }
   for (const c of CHAIN.B) { c.V.x = c.x; c.V.y = chainY(c); }
@@ -528,6 +531,8 @@ function drawMachines(t) {
       for (let y = CHAIN.top - 9; y <= yb; y++) link(c.x, y, (y - CHAIN.top) * -c.s + run);
       line(c.x, yb, c.V.x - c.V.hw + 1, chainY(c) - c.V.depth, C.inkRim); line(c.x, yb, c.V.x + c.V.hw - 1, chainY(c) - c.V.depth, C.inkRim);
       raster(c.x, CHAIN.top - 9, run / 6 * -c.s, 7, wheelShape(6, 4), 1, false); // pulley
+      const hx = Math.round(pose.shuttle + c.s * (SHUTTLE.hw - 4));                // shuttle hanger
+      for (let y = CHAIN.top - 9; y < SHUTTLE.y - 3; y++) put(hx, y, y & 1 ? C.shine : C.inkRim);
       line(c.x - 4, CHAIN.y0 + CHAIN.travel + 4, c.x + 4, CHAIN.y0 + CHAIN.travel + 4, C.stoneTop); // stop at the bottom
     }
     for (const tp of TIPPERS) stand(tp.V.x, tp.V.y + 2, tp.V.y + 30, 8);
@@ -565,9 +570,8 @@ function stepMachines() {
     }
   }
   // chained buckets: the weight difference drives the chain, friction slows it, the ends are hard stops.
-  // The chain's own weight favors whichever side has more of it hanging, so it never stalls halfway.
   const [cl, cr] = CHAIN.B;
-  CHAIN.v += ((cl.V.vol - cr.V.vol) / cl.V.cap * 90 + (CHAIN.pos / CHAIN.travel - .5) * 70 - CHAIN.v * 1.1) * DT;
+  CHAIN.v += ((cl.V.vol - cr.V.vol) / cl.V.cap * 90 - CHAIN.v * 1.1) * DT;
   CHAIN.pos += CHAIN.v * DT;
   if (CHAIN.pos < 0 || CHAIN.pos > CHAIN.travel) { CHAIN.pos = clamp(CHAIN.pos, 0, CHAIN.travel); CHAIN.v *= -.25; }
   for (const c of CHAIN.B) {
@@ -726,7 +730,10 @@ function fillVessel(V) {
     if (V.vol >= V.cap * .97) excess = Math.max(excess, 1.5);
     if (excess > .5) V.spill.push({ x: Math.round(out[0]), y: Math.round(out[1]), w: clamp(Math.round(excess * .7) + 1, 1, 9), dir: side * Math.sign(Math.cos(V.ang)) || side, excess });
   }
-  if (V.leak) { const p = toScreen(V.x, V.y, V.ang, 0, 7); V.spill.push({ x: Math.round(p[0]), y: Math.round(p[1]), w: 1, dir: 1, excess: V.leak }); }
+  if (V.leak || V.drain) { // a hole in the floor: a steady leak, or a drain that runs faster the fuller it is
+    const p = toScreen(V.x, V.y, V.ang, 0, 7), q = (V.leak || 0) + (V.drain || 0) * V.vol / V.qout;
+    V.spill.push({ x: Math.round(p[0]), y: Math.round(p[1]), w: q * V.qout > 15 ? 2 : 1, dir: 1, excess: q });
+  }
 }
 function vesselWater() { wmask.fill(0); for (const V of vessels) fillVessel(V); }
 // springs pour from both lower faces of their gems and surge unevenly, so the bodies below get shoved around
