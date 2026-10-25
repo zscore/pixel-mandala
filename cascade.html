@@ -189,20 +189,16 @@ const tileShape = (r, t, seed) => {
     return TILE[mod((Math.floor(e) >> 1) + b + seed + 3, 7)];
   };
 };
-// bamboo: a tube with a node, and a split trough
-const BAMBOO = { lt: hex('#c8eaa0'), mid: hex('#6fbf6a'), dk: hex('#2f7d5a'), edge: hex('#14402e'), node: hex('#e6f2b4'), inside: hex('#1f5a48') };
-const bambooWall = (u, R, v, nodes) => {
+// bamboo, for the split trough
+const BAMBOO = { lt: hex('#c8eaa0'), mid: hex('#6fbf6a'), dk: hex('#2f7d5a'), edge: hex('#14402e'), node: hex('#e6f2b4') };
+// stone sōzu tube: hollow chamber from the node (v = 0) out to the mouth (v = -depth), solid butt behind the node
+const stoneTube = (R, inner, depth, butt) => (u, v) => {
   const au = Math.abs(u);
-  if (au > R - .8) return BAMBOO.edge;
-  if (nodes.some(n => Math.abs(v - n) < 1.2)) return BAMBOO.node;
-  return u < -R + 2.2 ? BAMBOO.lt : u > R - 2.2 ? BAMBOO.dk : BAMBOO.mid;
-};
-// sōzu tube: hollow chamber from the node (v = 0) out to the mouth (v = -depth), solid butt behind the node
-const bambooTube = (R, inner, depth, butt) => (u, v) => {
-  if (Math.abs(u) > R + .5 || v < -depth - .5 || v > butt + .5) return null;
-  if (v < -.5 && Math.abs(u) < inner) return null;
-  if (v > butt - 1) return BAMBOO.edge;
-  return bambooWall(u, R, v, [0, butt * .6]);
+  if (au > R + .5 || v < -depth - .5 || v > butt + .5) return null;
+  if (v < -.5 && au < inner) return null;
+  if (au > R - .8 || v > butt - 1 || v < -depth + .5) return v < -depth + .5 ? C.stoneTop : C.ink;
+  if (Math.abs(v) < 1.2) return C.stoneTop;                        // the node
+  return u < -R + 2.2 ? C.stoneTop : mod(Math.round(v), 8) < 2 ? C.stone0 : C.stone1;
 };
 // half of a split-bamboo trough: a floor, the middle node on its inner end, and an open outer end
 const bambooHalf = (hw, depth, side) => (u, v) => {
@@ -211,7 +207,7 @@ const bambooHalf = (hw, depth, side) => (u, v) => {
   if (v < 0 && v >= -depth && u * -side >= hw - 3) return u * -side >= hw - .5 || v < -depth + 1 ? BAMBOO.node : BAMBOO.dk;
   return null;
 };
-const troughBack = (hw, depth) => (u, v) => Math.abs(u) <= hw && v < 0 && v >= -depth * .8 ? BAMBOO.inside : null;
+const troughBack = (hw, depth) => (u, v) => Math.abs(u) <= hw && v <= -depth + 1.5 && v >= -depth ? BAMBOO.dk : null; // the trough's far rim
 // a cup: floor plus two walls, pivoting about its middle
 const cupShape = (hw, depth) => (u, v) => {
   const au = Math.abs(u);
@@ -497,16 +493,29 @@ const rasterVessel = V => raster(V.x, V.y, V.ang, V.reach || Math.hypot(V.hw + 1
 // on one pivot under its middle. Its weight sits a little above the pivot, so it rests hard against one
 // stop or the other. The low half drains out its open end; the curtain fills the raised half against
 // the node until it outweighs the rest, and the whole pipe flips over and pours out the other way.
-const PIPE = { x: CX, y: 538, hw: 31, depth: 10, lift: 6, stop: .3, th: .3, w: 0, M: 420, I: 26000 };
-PIPE.H = [-1, 1].map(s => vessel({ hw: PIPE.hw, depth: PIPE.depth, inner: PIPE.hw - 3, lips: s < 0 ? [.5, PIPE.depth] : [PIPE.depth, .5], qin: 3.2, qout: 9,
+const PIPE = { x: CX, y: 540, hw: 31, depth: 13, lift: 5, stop: .4, th: .4, w: 0, M: 360, I: 9000 };
+// a fixed stone funnel gathers everything falling over the pipe onto its node; the node's top leans
+// toward whichever side is down, so the water always lands in the raised half (as in a rain gauge)
+const FUNNEL = [-1, 1].map(s => ({ x: CX + s * 23, y: 491, ang: -s * .45, hw: 19 }));
+PIPE.H = [-1, 1].map(s => vessel({ hw: PIPE.hw, depth: PIPE.depth, inner: PIPE.hw - 3, lips: s < 0 ? [.5, PIPE.depth] : [PIPE.depth, .5], qin: 3.2, qout: 70,
   shape: bambooHalf(PIPE.hw, PIPE.depth, s), side: s, vol: s < 0 ? 120 : 0 }));
 // center shuttle: hangs from the chain's top run, so the chained buckets slide it back and forth
 // under the curtain, throwing the water left and right
-const SHUTTLE = { y: 318, hw: 18, reach: 66 };
-// seesaw: two buckets on a beam; the heavier side sinks, tips its bucket out and pours
-const SEE = { x: CX, y: 404, L: 52, th: 0, w: 0 };
+const SHUTTLE = { y: 306, hw: 18, reach: 66 };
+// seesaw: two buckets on a beam; the heavier side sinks and tips its bucket inward, pouring into the pipe
+const SEE = { x: CX, y: 404, L: 47, th: 0, w: 0 };
 SEE.A = vessel({ hw: 17, depth: 13, qin: 10, qout: 26 });
 SEE.B = vessel({ hw: 17, depth: 13, qin: 10, qout: 26 });
+// noria: a wheel of buckets in the curtain, turned only by the weight of the water they hold.
+// Buckets on the way down carry water; past the side they spill it into the seesaw's buckets and
+// come up empty. Which way it turns depends on which side the shuttle is throwing the curtain.
+const NORIA = { x: CX, y: 356, R: 27, n: 8, a: .2, w: 0, I: 500 };
+NORIA.B = Array.from({ length: NORIA.n }, () => vessel({ hw: 6, depth: 7, qin: 12, qout: 30 }));
+// flippers: stone paddles balanced on pivots either side of the noria, weighted below so they settle
+// level. Water the shuttle throws off its ends lands on one side, tips them, and runs off the low end.
+const FLIP = [-1, 1].map(s => ({ s, x: s < 0 ? 124 : MX(124), y: 343, hw: 14, a: 0, w: 0 }));
+// tsukubai: stone basins under the pipe's ends that fill and brim over both lips into the lake
+const TSUKUBAI = [-1, 1].map(s => vessel({ x: s < 0 ? 118 : MX(118), y: 586, hw: 13, depth: 7, qin: 6, qout: 8, vol: 60 }));
 // swing: a pendulum hanging from the seesaw's axle, batting the curtain's middle. Water dragging
 // across the seat pushes it along; the seat hangs on its own pivot and tips under the water's weight.
 const PEND = { L: 60, hw: 13, a: .5, w: 0, tilt: 0, tw: 0 };
@@ -516,13 +525,15 @@ const seatPos = () => [SEE.x + Math.sin(PEND.a) * PEND.L, SEE.y + Math.cos(PEND.
 // and the empty butt swings back down and knocks against its rock.
 const SOZU = [-1, 1].map(s => ({
   s, P: { x: s < 0 ? 74 : MX(74), y: 384 }, th: .75, w: 0, rest: .75, max: 2.25, M: 70, I: 420,
-  V: vessel({ hw: 6, inner: 3, depth: 26, qin: 20, qout: 40, shape: bambooTube(5, 3, 26, 16), reach: 30 }),
+  V: vessel({ hw: 6, inner: 3, depth: 26, qin: 20, qout: 40, shape: stoneTube(5, 3, 26, 16), reach: 30 }),
 }));
 const SOZU_PIV = 3, SOZU_CM = 7; // pivot sits 3px toward the mouth from the node; the empty tube's balance point 7px behind it
 // drip bowls under the upper ledges: fill, brim over both lips, and leak from a hole in the floor
 const BOWLS = [-1, 1].map(s => vessel({ x: s < 0 ? 93 : MX(93), y: 274, hw: 10, depth: 9, qin: 14, qout: 20, leak: .8 }));
 // water wheels: turned by the water running over their paddles
-const WHEELS = [-1, 1].map(s => ({ s, x: s < 0 ? 100 : MX(100), y: 458, r: 22, n: 6, a: 0, w: 0 }));
+// (overshot: cups on the rim catch the sōzu's dump on the wheel's top quarter, and their weight turns it)
+const WHEELS = [-1, 1].map(s => ({ s, x: s < 0 ? 108 : MX(108), y: 458, r: 20, n: 8, a: 0, w: 0,
+  B: Array.from({ length: 8 }, () => vessel({ hw: 5, depth: 6, qin: 14, qout: 30 })) }));
 // chained buckets: one chain over two pulleys, a bucket on each end under the outer falls.
 // The heavier one sinks and hauls the other up; at the bottom it hits a stop, tips out, and goes light.
 // Each drips from a hole in its floor, faster the fuller it is, so its level follows how much water
@@ -550,8 +561,16 @@ function stand(x, y, y1, hw) { // a little A-frame from an axle down to the grou
 function placeMachines(t) {
   pose.shuttle = CX + (CHAIN.travel / 2 - CHAIN.pos) / (CHAIN.travel / 2) * SHUTTLE.reach; // the top run moves toward the sinking side
   const ca = Math.cos(SEE.th), sa = Math.sin(SEE.th);
-  for (const [V, s] of [[SEE.A, -1], [SEE.B, 1]]) { V.x = SEE.x + s * SEE.L * ca; V.y = SEE.y + s * SEE.L * sa - 1; V.ang = SEE.th * 2.1; }
+  for (const [V, s] of [[SEE.A, -1], [SEE.B, 1]]) { V.x = SEE.x + s * SEE.L * ca; V.y = SEE.y + s * SEE.L * sa - 1; V.ang = -SEE.th * 2.1; }
   for (const c of CHAIN.B) { c.V.x = c.x; c.V.y = chainY(c); }
+  for (const wh of WHEELS) wh.B.forEach((V, k) => {
+    const f = wh.a + k * Math.PI * 2 / wh.n;
+    V.x = wh.x + wh.r * Math.sin(f); V.y = wh.y - wh.r * Math.cos(f); V.ang = f;
+  });
+  NORIA.B.forEach((V, k) => {
+    const f = NORIA.a + k * Math.PI * 2 / NORIA.n;
+    V.x = NORIA.x + NORIA.R * Math.sin(f); V.y = NORIA.y - NORIA.R * Math.cos(f); V.ang = f; // opening faces outward
+  });
   for (const z of SOZU) {
     const a = -z.s * z.th; z.V.ang = a;
     z.V.x = z.P.x - SOZU_PIV * Math.sin(a); z.V.y = z.P.y + SOZU_PIV * Math.cos(a);
@@ -583,6 +602,10 @@ function drawMachines(t) {
       for (let y = z.P.y; y < z.P.y + 28; y++) { put(z.P.x - 1, y, C.inkRim); put(z.P.x, y, C.stone0); put(z.P.x + 1, y, C.inkRim); }
     }
     stand(PIPE.x, PIPE.y, PIPE.y + 18, 9);
+    for (const f of FLIP) { line(f.x, f.y, f.x, f.y + 12, C.inkRim); bead(f.x, f.y + 14, t); } // the bob that keeps it level
+    // noria: rim and spokes behind the buckets (water falls straight through them)
+    for (let k = 0; k < 64; k++) { const f = k / 64 * Math.PI * 2; put(NORIA.x + Math.cos(f) * (NORIA.R - 2), NORIA.y + Math.sin(f) * (NORIA.R - 2), k & 1 ? C.stone2 : C.inkRim); }
+    NORIA.B.forEach((V, k) => { const f = NORIA.a + (k + .5) * Math.PI * 2 / NORIA.n; line(NORIA.x, NORIA.y, NORIA.x + Math.sin(f) * (NORIA.R - 2), NORIA.y - Math.cos(f) * (NORIA.R - 2), C.inkRim); });
     for (const V of PIPE.H) raster(V.x, V.y, V.ang, PIPE.hw + 2, troughBack(PIPE.hw - 3, PIPE.depth), 1, false);
     for (const wh of WHEELS) stand(wh.x, wh.y, wh.y + 36, 14);
     stand(SEE.x, SEE.y, SEE.y + 92, 10);
@@ -594,13 +617,19 @@ function drawMachines(t) {
     thickLine(SEE.x - SEE.L * ca, SEE.y - SEE.L * sa + 6, SEE.x + SEE.L * ca, SEE.y + SEE.L * sa + 6, C.stone1);
     eye(SEE.x, SEE.y + 1, t, 5);
   }
+  for (const f of FUNNEL) raster(f.x, f.y, f.ang, f.hw + 2, stoneRect(f.hw, 2));
+  for (const f of FLIP) raster(f.x, f.y, f.a, f.hw + 2, stoneRect(f.hw, 2));
   // shuttle
   raster(pose.shuttle, SHUTTLE.y, 0, SHUTTLE.hw + 1, stoneRect(SHUTTLE.hw, 3));
   const [px, py] = seatPos();
   raster(px, py, PEND.tilt, PEND.hw + 1, stoneRect(PEND.hw, 2));
-  for (const wh of WHEELS) raster(wh.x, wh.y, wh.a, wh.r + 1, wheelShape(wh.r, wh.n));
+  // water wheels: spokes are open (water falls between them); the hub and paddles are solid
+  for (const wh of WHEELS) { // open spokes behind, a solid hub; the cups are vessels
+    if (drawOn) wh.B.forEach(V => line(wh.x, wh.y, V.x, V.y, C.stone2));
+    raster(wh.x, wh.y, 0, 6, (u, v) => { const r = Math.hypot(u, v); return r > 5.5 ? null : r < 2.2 ? C.gold : r > 4.5 ? C.ink : C.stoneTop; });
+  }
   for (const V of vessels) rasterVessel(V);
-  if (drawOn) for (const P of [...SOZU.map(z => z.P), PIPE]) { put(P.x, P.y, C.gold); put(P.x + 1, P.y, C.ink); put(P.x, P.y + 1, C.ink); }
+  if (drawOn) for (const P of [...SOZU.map(z => z.P), PIPE, NORIA, ...FLIP]) { put(P.x, P.y, C.gold); put(P.x + 1, P.y, C.ink); put(P.x, P.y + 1, C.ink); }
 }
 // physics for the machines that respond to the water (runs after the water is traced)
 function stepMachines() {
@@ -614,11 +643,34 @@ function stepMachines() {
     if (z.th < z.rest) { if (z.w < -.6) sfx('knock', Math.min(1, -z.w / 5), z.P.x); z.th = z.rest; z.w *= -.3; }
     if (z.th > z.max) { z.th = z.max; z.w *= -.2; }
   }
+  // flippers: weight of water running on the paddle about its pivot, against the bob hanging below
+  for (const f of FLIP) {
+    const ca = Math.cos(f.a), sa = Math.sin(f.a);
+    let tq = 0;
+    for (const s of streams) for (let i = 0; i < s.nd; i++) {
+      if (s.kind[i] !== 1) continue;
+      const dx = s.xs[i] - f.x, dy = s.ys[i] - f.y, u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
+      if (Math.abs(u) <= f.hw + 1 && v >= -6 && v <= 1) tq += dx * s.width[i];
+    }
+    for (const s of streams) for (const i of s.impacts) {
+      if (i >= s.nd) break;
+      const dx = s.xs[i] - f.x, dy = s.ys[i] - f.y;
+      if (Math.abs(dx) <= f.hw + 1 && Math.abs(dy) <= 6) tq += dx * s.width[i] * fallSpeed(s.run[i]) / 40;
+    }
+    f.w += (tq / 150 - 3 * Math.sin(f.a) - 1.6 * f.w) * DT; f.a += f.w * DT;
+    if (Math.abs(f.a) > .7) { f.a = Math.sign(f.a) * .7; f.w *= -.3; }
+  }
+  // noria: the water in its buckets turns it, against axle friction
+  {
+    let tq = 0;
+    for (const V of NORIA.B) for (const k of V.pix) tq += (k % W) - NORIA.x;
+    NORIA.w += (tq / NORIA.I - .5 * NORIA.w) * DT; NORIA.a += NORIA.w * DT;
+  }
   // double pipe: water's weight about the pivot, plus its own weight sitting above the pivot
   {
     let tq = PIPE.M * PIPE.lift * Math.sin(PIPE.th);
     for (const V of PIPE.H) for (const k of V.pix) tq += (k % W) - PIPE.x;
-    PIPE.w += (tq / PIPE.I - .8 * PIPE.w) * DT; PIPE.th += PIPE.w * DT;
+    PIPE.w += (tq / PIPE.I - .3 * PIPE.w) * DT; PIPE.th += PIPE.w * DT;
     if (Math.abs(PIPE.th) > PIPE.stop) {
       if (Math.abs(PIPE.w) > .25) sfx('tok', Math.min(1, Math.abs(PIPE.w) / 1.5), PIPE.x + Math.sign(PIPE.th) * 60);
       PIPE.th = Math.sign(PIPE.th) * PIPE.stop; PIPE.w *= -.25;
@@ -653,15 +705,11 @@ function stepMachines() {
   const tq = (SEE.B.vol - SEE.A.vol) / Math.max(1, SEE.A.cap) * 2.6 - SEE.th * 1.1 - SEE.w * 1.4;
   SEE.w += tq * DT; SEE.th += SEE.w * DT;
   if (Math.abs(SEE.th) > .34) { SEE.th = Math.sign(SEE.th) * .34; SEE.w *= -.2; }
-  // wheels: water running over a paddle pushes that side down
+  // wheels: water striking and running over the paddles pushes that side down
   for (const wh of WHEELS) {
     let tq = 0;
-    for (const s of streams) for (let i = 0; i < s.nd; i++) {
-      if (s.kind[i] !== 1) continue;
-      const dx = s.xs[i] - wh.x, dy = s.ys[i] - wh.y;
-      if (dx * dx + dy * dy <= (wh.r + 2) ** 2) tq += dx / wh.r * s.width[i];
-    }
-    wh.w += (tq * .06 - wh.w * .7) * DT; wh.a += wh.w * DT;
+    for (const V of wh.B) for (const k of V.pix) tq += (k % W) - wh.x;
+    wh.w += ((tq + waterTorque(wh.x, wh.y, wh.r + 7) * .3) / 380 - wh.w * .6) * DT; wh.a += wh.w * DT;
   }
 }
 
@@ -719,19 +767,40 @@ const PATS = Array.from({ length: 48 }, (_, seed) => {
 });
 
 let streams = [];
+const splits = []; // streams parted off where water lands on a flat or a peak, traced after their parents
 // a bump water can brim over: one pixel high, and the surface drops back down within a couple of pixels
 const bump = (x, y, d) => !blockedW(x + d, y - 1) && !blockedW(x, y - 1) && (!blockedW(x + 2 * d, y) || !blockedW(x + 3 * d, y));
-function trace(x, y, w, dir, seed) {
+// the vessel (if any) whose cavity holds (x, y)
+function vesselAt(x, y) {
+  for (const V of vessels) {
+    const ca = Math.cos(V.ang), sa = Math.sin(V.ang), dx = x - V.x, dy = y - V.y;
+    const u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
+    if (Math.abs(u) < V.hw && v > -V.depth - 4 && v < 2) return V;
+  }
+  return null;
+}
+// water trapped in a hollow that isn't a vessel rises until it can step over one side of the rim
+function overflow(x, y, dir) {
+  if (vesselAt(x, y)) return null;                       // in a vessel it's just filling it
+  for (let h = 1; h <= 10 && !blockedW(x, y - h); h++)
+    for (const d of [dir, -dir]) if (!blockedW(x + d, y - h)) return [x + d, y - h, d];
+  return null;
+}
+function trace(x, y, w, dir, seed, from = null) {
   const id = streams.length;
-  const s = { id, seed, xs: [], ys: [], kind: [], dir: [], tau: [], width: [], run: [], impacts: [], end: 'stuck', merge: null, nd: 0 };
+  const s = { id, seed, xs: [], ys: [], kind: [], dir: [], tau: [], width: [], run: [], impacts: [], end: 'stuck', merge: null, nd: 0, parent: from && from.slice(0, 2) };
   streams.push(s);
-  let tau = 0, run = 0, falling = true, moved = false;
+  let tau = from ? from[2] : 0, run = 0, falling = !from, moved = !!from, revisits = 0;
   for (let step = 0; step < 1500; step++) {
     if (y >= POOL) { s.end = 'pool'; break; }
     if (y >= 0) {
       const k = y * W + x, o = owner[k];
-      if (o === id) break;                               // circling in a hollow
-      if (o >= 0) {                                      // join the other stream: it widens from here on
+      if (o === id && ++revisits > 3) {                 // circling in a hollow (a turnaround or two is fine)
+        const e = overflow(x, y, dir);                   // ...so it fills up and spills over the rim
+        if (!e) break;
+        [x, y, dir] = e; revisits = 0; tau += 1.3; continue;
+      }
+      if (o >= 0 && o !== id) {                          // join the other stream: it widens from here on
         s.merge = [o, ownerI[k]]; s.end = 'merge'; break;
       }
       owner[k] = id; ownerI[k] = s.xs.length;
@@ -743,14 +812,26 @@ function trace(x, y, w, dir, seed) {
       falling = true; run++; y++;
       tau += 1 / Math.min(4.5, 1 + run * .07);           // water accelerates as it falls
     } else {
-      if (falling) s.impacts.push(s.xs.length - 1);
+      if (falling) {
+        s.impacts.push(s.xs.length - 1);
+        // landing: run downhill if one side is lower; on a flat (or a peak) the water parts both ways
+        const dl = !blockedW(x - 1, y + 1), dr = !blockedW(x + 1, y + 1), fl = !blockedW(x - 1, y), fr = !blockedW(x + 1, y);
+        if (dl !== dr) dir = dl ? -1 : 1;
+        else if (dl || (fl && fr)) {
+          if (w >= 2 && splits.length < 80) {
+            const h = w >> 1, cx = x - dir, cy = blockedW(cx, y + 1) ? y : y + 1;
+            w -= h;
+            splits.push([cx, cy, h, -dir, (seed + 17) % PATS.length, [id, s.xs.length - 1, tau]]);
+          }
+        } else if (fl !== fr) dir = fl ? -1 : 1;
+      }
       falling = false; moved = true;
       if (!blockedW(x + dir, y + 1)) { x += dir; y++; }
       else if (!blockedW(x + dir, y)) x += dir;
       else if (bump(x, y, dir)) { x += dir; y--; } // brim over a 1px bump (jaggies, dissolving stone) — but never creep up a slope
       else if (!blockedW(x - dir, y)) { dir = -dir; x += dir; }
       else if (bump(x, y, -dir)) { dir = -dir; x += dir; y--; }
-      else break;
+      else { const e = overflow(x, y, dir); if (!e) break; [x, y, dir] = e; } // a pit: fill it and spill over
       tau += 1.3;
     }
   }
@@ -806,16 +887,19 @@ function traceAll() {
   streams = [];
   SOURCES.forEach(([x, y, w, d, pulse], k) => trace(x, y, pulse ? Math.max(1, Math.round(pulse(simT))) : w, d, k));
   vessels.forEach((V, j) => V.spill.forEach((sp, k) => trace(sp.x, sp.y, sp.w, sp.dir, (SOURCES.length + j * 2 + k) % PATS.length)));
+  for (let q = 0; q < splits.length; q++) trace(...splits[q]);
+  splits.length = 0;
   settleFronts();
   // settle the vessels: water that ended inside one raises its level, spilling lowers it
+  // (a stream that joins another inside a vessel before that one's water has got there pours in itself)
   for (const s of streams) {
     const n = s.xs.length;
-    if (s.end !== 'stuck' || !n || s.nd < n) continue;
-    for (const V of vessels) {
-      const ca = Math.cos(V.ang), sa = Math.sin(V.ang), dx = s.xs[n - 1] - V.x, dy = s.ys[n - 1] - V.y;
-      const u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
-      if (Math.abs(u) < V.hw && v > -V.depth - 4 && v < 2) { V.vol += DT * s.width[n - 1] * V.qin; break; }
-    }
+    if (!n || s.nd < n) continue;
+    let x = s.xs[n - 1], y = s.ys[n - 1];
+    if (s.end === 'merge') { const [o, j] = s.merge, t = streams[o]; if (t.nd > j) continue; x = t.xs[j]; y = t.ys[j]; }
+    else if (s.end !== 'stuck') continue;
+    const V = vesselAt(x, y);
+    if (V) V.vol += DT * s.width[n - 1] * V.qin;
   }
   for (const V of vessels) for (const sp of V.spill) V.vol = Math.max(0, V.vol - DT * sp.excess * V.qout);
 }
@@ -836,8 +920,12 @@ function settleFronts() {
   const adv = SPEED * DT;
   for (const s of streams) {
     const n = s.xs.length;
-    let k = 0;
-    while (k < n && wasWet(s.xs[k], s.ys[k])) k++;     // already flowing here
+    // a parted-off stream has no water until its parent's water reaches the place it parted
+    if (s.parent && streams[s.parent[0]].nd <= s.parent[1]) { s.nd = 0; continue; }
+    let k = 0;                                         // already flowing here — allowing short gaps where the
+    for (let i = 0, gap = 0; i < n && gap <= 40; i++) {  // route wiggled past something moving
+      if (wasWet(s.xs[i], s.ys[i])) { k = i + 1; gap = 0; } else gap++;
+    }
     const front = k < n ? s.tau[k] + adv : Infinity;   // ...then one step further
     let nd = k;
     while (nd < n && s.tau[nd] <= front) nd++;
