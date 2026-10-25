@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cascade Mandala</title>
 <style>
-  :root { --bg: #0b0f1c; --panel: rgba(12, 16, 34, .86); --ink: #cfd6f2; --dim: #6c7598; --on: #7fe0ff; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  :root { --bg: #0b0f1c; }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
   body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
   canvas {
     height: min(96vh, calc(96vw * 16 / 9));
@@ -17,28 +17,10 @@
     cursor: none;
     touch-action: none;
   }
-  #panel { position: fixed; top: 12px; left: 12px; background: var(--panel); border: 1px solid #262d4e; border-radius: 6px; padding: 8px 10px; user-select: none; }
-  #panel.hidden { display: none; }
-  #panel .hd { color: var(--dim); margin-bottom: 6px; }
-  #panel ul { list-style: none; margin: 0; padding: 0; }
-  #panel li { cursor: pointer; padding: 1px 0; white-space: nowrap; }
-  #panel li .k { color: var(--dim); display: inline-block; width: 1.6em; }
-  #panel li .b { display: inline-block; width: 1.4em; color: var(--on); }
-  #panel li.off { color: var(--dim); }
-  #panel li.off .b { color: var(--dim); }
-  #panel li:hover { color: #fff; }
-  #panel .snd { cursor: pointer; color: var(--on); margin-bottom: 6px; }
-  #panel .stat { color: var(--dim); margin-top: 6px; }
 </style>
 </head>
 <body>
 <canvas id="c" title="drag a part to turn it · space to pause"></canvas>
-<div id="panel">
-  <div class="hd">layers · click toggle · shift-click solo<br>1–0 keys · space pause · L hide<br>drag a part to turn it</div>
-  <div class="snd" id="snd">♪ sound off · M</div>
-  <ul id="list"></ul>
-  <div class="stat" id="stat"></div>
-</div>
 <script>
 const W = 360, H = 640, CX = 180, N = W * H * 4;
 const DY = 190;        // everything from the hills down sits this far below the original 4:5 layout
@@ -111,9 +93,11 @@ const C = {
   stone0: hex('#1a2560'), stone1: hex('#26368a'), stone2: hex('#3a52b8'), stoneTop: hex('#9fb4ff'),
   purpleDk: hex('#3a2a8a'), purpleEdge: hex('#a07ae8'),
   foam: hex('#f4fcff'), facet0: hex('#7d8fc0'), facet1: hex('#a8b8e0'), pupil: hex('#3fb8e0'),
-  guide: hex('#1a3f9a'), jade0: hex('#35b096'), jade1: hex('#2fa48e'), well: hex('#0b1440'),
+  guide: hex('#1a3f9a'), jade0: hex('#35b096'), jade1: hex('#2fa48e'),
 };
 const WATER = ['#1f4fb8', '#2f78d8', '#4a9ae8', '#5cb4f0', '#93dcff', '#c8f0ff', '#f4fcff'].map(hex);
+const RAIN = ['#c9f2e2', '#9fe3d8', '#bfe9f5', '#d2c4f5', '#b9a6ec', '#f0f4ff', '#f3c6dc', '#86c9ee', '#5fd3be', '#e8f7b0', '#a8b8f4'].map(hex);
+const NEON = ['#3dfcff', '#ff4fd8', '#a46bff', '#4dffb0'].map(hex);
 const TILE = ['#2fd3c0', '#1e48c8', '#8f5ae6', '#f39a3c', '#3bb6f0', '#5ee08a', '#e75fa8'].map(hex);
 const CIRC = ['#1d47c9', '#f08d2e', '#9b52e0', '#e9f4ff', '#1f2e7a', '#ffd84a'].map(hex);
 const SILVER = ['#5d6582', '#aeb6cc', '#e4e8f2', '#8a92ac'].map(hex);
@@ -175,16 +159,35 @@ const gemShape = (r, pal, t) => {
     return Math.round(Math.abs(u) + Math.abs(v)) & 1 ? C.facet0 : C.facet1;
   };
 };
+// a circuit maze for a diamond face: one quadrant of random traces and pads (values 1..ncol pick
+// the color), mirrored four ways when drawn
+function circuitMaze(r, cell, ncol, seed) {
+  const R = rng(seed), n = Math.ceil((r + 1) / cell), m = new Uint8Array((r + 1) * (r + 1)), pad = cell >> 1;
+  for (let gy = 0; gy < n; gy++) for (let gx = 0; gx < n; gx++) {
+    const top = R() < .5, left = R() < .5, dot = R() < .3, col = 1 + Math.floor(R() * ncol);
+    for (let ly = 0; ly < cell; ly++) for (let lx = 0; lx < cell; lx++) {
+      const dx = gx * cell + lx, dy = gy * cell + ly;
+      if (dx > r || dy > r) continue;
+      if ((top && ly === 0) || (left && lx === 0) || (dot && lx === pad && ly === pad)) m[dy * (r + 1) + dx] = col;
+    }
+  }
+  return m;
+}
+// side diamond faces: a finer circuit in the tile colors over dark violet, with the same sweep of light as the great diamond
+const TILE_BG = ['#1a1f5c', '#221a66', '#2c3a9a'].map(hex);
+const tileMazes = {};
 const tileShape = (r, t, seed) => {
-  const a = Math.floor(t * 2), b = Math.floor(t * 1.3);
+  const maze = tileMazes[r + ':' + seed] ??= circuitMaze(r, 3, TILE.length, 97 + seed * 31);
+  const wave = mod(t * 18 + seed * 9, r + 20), shift = t * 1.5;
   return (u, v) => {
     const e = edgeD(u, v, r);
     if (e < 0) return null;
-    const m = Math.round(Math.max(Math.abs(u), Math.abs(v)));
     if (e < 2) return C.navy;
-    if (m <= Math.max(1, r * .3)) return C.white;
-    if (m <= r * .55) return m % 3 === 0 ? C.deep : TILE[mod((m >> 1) - a + seed, 7)];
-    return TILE[mod((Math.floor(e) >> 1) + b + seed + 3, 7)];
+    const ax = Math.min(r, Math.round(Math.abs(u))), ay = Math.min(r, Math.round(Math.abs(v))), d = ax + ay;
+    const cv = maze[ay * (r + 1) + ax];
+    let c = cv ? TILE[mod(cv - 1 + seed + Math.floor(shift - d / 6), TILE.length)] : d % 9 === 0 ? TILE_BG[2] : TILE_BG[(d >> 2) & 1];
+    if (Math.abs(d - wave) < 1.5) c = lerpC(c, C.white, cv ? .7 : .3);
+    return c;
   };
 };
 // stone sōzu tube: hollow chamber from the node (v = 0) out to the mouth (v = -depth), solid butt behind the node
@@ -215,18 +218,7 @@ const cupShape = (hw, depth) => (u, v) => {
 
 // great diamond face: a circuit maze (one quadrant, mirrored four ways)
 const D1 = { x: CX, y: 150, r: 50 };
-const circ = new Uint8Array((D1.r + 1) * (D1.r + 1));
-(function buildCircuit() {
-  const R = rng(42), CELL = 4, n = Math.ceil((D1.r + 1) / CELL);
-  for (let gy = 0; gy < n; gy++) for (let gx = 0; gx < n; gx++) {
-    const top = R() < .5, left = R() < .5, dot = R() < .3, col = 1 + Math.floor(R() * CIRC.length);
-    for (let ly = 0; ly < CELL; ly++) for (let lx = 0; lx < CELL; lx++) {
-      const dx = gx * CELL + lx, dy = gy * CELL + ly;
-      if (dx > D1.r || dy > D1.r) continue;
-      if ((top && ly === 0) || (left && lx === 0) || (dot && lx === 2 && ly === 2)) circ[dy * (D1.r + 1) + dx] = col;
-    }
-  }
-})();
+const circ = circuitMaze(D1.r, 4, CIRC.length, 42);
 const greatDiamond = t => {
   const r = D1.r, wave = mod(t * 22, r + 24), shift = t * 1.5;
   return (u, v) => {
@@ -235,8 +227,6 @@ const greatDiamond = t => {
     if (e < 1) return C.ink;
     if (e < 3) return C.stoneTop;
     if (e < 4.5) return C.deep;
-    const rr = u * u + v * v;
-    if (rr < 73) return rr > 57 ? C.ink : C.well;
     const ax = Math.min(r, Math.round(Math.abs(u))), ay = Math.min(r, Math.round(Math.abs(v))), d = ax + ay;
     const cv = circ[ay * (r + 1) + ax];
     let c = cv ? CIRC[mod(cv - 1 + Math.floor(shift - d / 8), CIRC.length)] : d % 12 === 0 ? C.guide : ((d >> 2) & 1) ? C.jade0 : C.jade1;
@@ -288,6 +278,32 @@ function layer(name, opts) {
   if (L.static) { T = L.buf; L.draw(0); }
   layers.push(L); return L;
 }
+
+// ---- rising rain: faint pixel curtains drifting up off the lake ----------
+const PL = 256;
+const rain = [];
+(function buildRain() {
+  const R = rng(3);
+  for (let x = 0; x < W; x++) {
+    const pat = new Uint8Array(PL), dens = x % 2 === 0 ? .45 : .2;
+    let p = 0;
+    while (p < PL) {
+      if (R() < dens) { const len = 1 + Math.floor(R() * 5), ci = 1 + Math.floor(R() * RAIN.length); for (let k = 0; k < len && p < PL; k++) pat[p++] = ci; p++; }
+      else p += 1 + Math.floor(R() * 3);
+    }
+    const top = 40 + Math.floor(fbm(x * .07, 5) * 160 + R() * 40); // where it has faded out entirely
+    rain.push({ pat, top, sp: 6 + R() * 18, ph: R() * PL, a: x % 2 === 0 ? .24 : .13 });
+  }
+})();
+layer('rising rain', { draw(t) {
+  for (let x = 0; x < W; x++) {
+    const col = rain[x], off = Math.floor(t * col.sp + col.ph), span = POOL - col.top;
+    for (let y = col.top; y < POOL; y++) {
+      const ci = col.pat[mod(y + off, PL)];
+      if (ci) mix(x, y, RAIN[ci - 1], col.a * ((y - col.top) / span) ** .7 * Math.min(1, (POOL - y) / 12));
+    }
+  }
+} });
 
 // ---- temple: the moving, colliding architecture ----------------
 const S0 = { x: CX, y: 30, r: 16 };                         // crown spring (fixed)
@@ -689,7 +705,7 @@ layer('temple', { update(t) {
 
   pose.d1 = BODY.d1.a;
   raster(D1.x, D1.y, pose.d1, D1.r * 1.05, greatDiamond(t));
-  if (drawOn) { beadPath(diamondRing(D1.x, D1.y, D1.r + 7, pose.d1), t); eye(D1.x, D1.y, t, 0); }
+  if (drawOn) { beadPath(diamondRing(D1.x, D1.y, D1.r + 7, pose.d1), t); }
 
   raster(S0.x, S0.y, 0, S0.r, gemShape(S0.r, GEM_TOP, t));
   raster(G.x, G.y, 0, G.r, gemShape(G.r, GEM_LIP, t));
@@ -700,7 +716,7 @@ layer('temple', { update(t) {
     raster(sd.spring.x, sd.spring.y, 0, sd.spring.r, gemShape(sd.spring.r, GEM_SIDE, t));
     const a = BODY.d2[sd.s < 0 ? 0 : 1].a;
     raster(sd.d2.x, sd.d2.y, a, sd.d2.r * 1.05, tileShape(sd.d2.r, t, sd.s < 0 ? 0 : 3));
-    if (drawOn) { beadPath(diamondRing(sd.d2.x, sd.d2.y, sd.d2.r + 6, a), t); eye(sd.d2.x, sd.d2.y, t, sd.s * 2); }
+    if (drawOn) { beadPath(diamondRing(sd.d2.x, sd.d2.y, sd.d2.r + 6, a), t); }
     // ledges dissolve away and re-form, so the water has to find a new way down
     for (const l of [sd.l1, sd.l2]) raster(l.x, l.y, 0, l.hw + 1, stoneRect(l.hw, l.hh), cycle(t, l.period, l.off, .22, .1));
   }
@@ -957,6 +973,13 @@ function emit() {
 }
 function simStep() { vesselWater(); traceAll(); stepMachines(); stepBodies(); handFx(); emit(); }
 
+// pulses of neon riding down the streams with the water: each one a band of a single color,
+// fixed to a spot in the flow (v) so it travels at the water's speed, and the whole lot breathing slowly
+function neon(c, v, seed, t) {
+  const p = v * .045 + seed * .61, k = Math.sin(p * Math.PI * 2);
+  if (k <= 0) return c;
+  return lerpC(c, NEON[mod(Math.floor(p) + seed, NEON.length)], k * k * (.75 + .2 * Math.sin(t * 2.3 + seed)));
+}
 const COLOFF = PATS.map((_, seed) => Array.from({ length: 12 }, (_, o) => Math.floor(h2(o, seed * 5) * 64)));
 function drawStream(s, t, i0, i1, ghost) {
   const n = s.xs.length, pat = PATS[s.seed], off = COLOFF[s.seed];
@@ -976,7 +999,7 @@ function drawStream(s, t, i0, i1, ghost) {
       } else { lo = x0; hi = x0 + w - 1; }
       const lip = i > 0 && s.kind[i - 1] === 1;
       for (let px = lo; px <= hi; px++) {
-        const o = px - x0, c = lip ? C.foam : WATER[pat[mod(Math.floor(v * .8) + off[o], 64)]];
+        const o = px - x0, c = lip ? C.foam : neon(WATER[pat[mod(Math.floor(v * .8) + off[o], 64)]], v, s.seed, t);
         mix(px, y, c, (px === lo || px === hi) && hi - lo > 1 ? .6 : .94);
       }
     } else {
@@ -985,7 +1008,7 @@ function drawStream(s, t, i0, i1, ghost) {
       const th = slope ? 2 + Math.min(2, w >> 1) : 1 + Math.min(2, w >> 2);
       for (let k = 0; k < th; k++) {
         const ci = pat[mod(Math.floor(v) + k * 17, 64)];
-        const c = k === th - 1 ? lerpC(WATER[ci], C.foam, .35) : WATER[ci], a = k === th - 1 ? .75 : .95;
+        const c = k === th - 1 ? lerpC(WATER[ci], C.foam, .35) : neon(WATER[ci], v, s.seed, t), a = k === th - 1 ? .75 : .95;
         if (slope) { mix(x + d * k, y, c, a); mix(x + d * k, y - 1, c, a * .8); }
         else mix(x, y - k, c, a);
       }
@@ -1138,13 +1161,6 @@ function voice(ctx, out, when, e) {
     tone(f, .16 * v, 2.4); tone(f * 2.76, .05 * v, .9); tone(f * 5.4, .025 * v, .35);
   }
 }
-function setSound(on) {
-  SOUND.on = on;
-  if (on && !SOUND.ctx) { SOUND.ctx = new AudioContext(); SOUND.out = soundGraph(SOUND.ctx); }
-  if (SOUND.ctx) on ? SOUND.ctx.resume() : SOUND.ctx.suspend();
-  document.getElementById('snd').textContent = `♪ sound ${on ? 'on' : 'off'} · M`;
-}
-document.getElementById('snd').onclick = () => setSound(!SOUND.on);
 // for recordings: render the logged events into a WAV (returned as base64)
 async function renderSoundtrack(events, t0, dur) {
   const sr = 44100, ctx = new OfflineAudioContext(2, Math.ceil(dur * sr), sr), out = soundGraph(ctx);
@@ -1159,25 +1175,8 @@ async function renderSoundtrack(events, t0, dur) {
   return btoa(bin);
 }
 
-// ---------- layer panel ----------
-const list = document.getElementById('list'), stat = document.getElementById('stat');
-function renderPanel() {
-  list.innerHTML = '';
-  layers.forEach((L, i) => {
-    const li = document.createElement('li');
-    li.className = L.on ? '' : 'off';
-    li.innerHTML = `<span class="k">${(i + 1) % 10}</span><span class="b">${L.on ? '■' : '□'}</span>${L.name}`;
-    li.onclick = e => {
-      if (e.shiftKey) { const solo = layers.every((M, j) => M.on === (j === i)); layers.forEach((M, j) => M.on = solo || j === i); }
-      else L.on = !L.on;
-      renderPanel();
-    };
-    list.appendChild(li);
-  });
-}
-renderPanel();
 const params = new URLSearchParams(location.search);
-if (params.has('only')) { const want = params.get('only').split(','); layers.forEach(L => L.on = want.includes(L.name)); renderPanel(); }
+if (params.has('only')) { const want = params.get('only').split(','); layers.forEach(L => L.on = want.includes(L.name)); }
 
 // pre-run the world a few seconds so the water is already flowing on load
 let clock = +(params.get('t') || 6);
@@ -1186,12 +1185,11 @@ drawOn = false;
 while (simT + DT <= clock) { simT += DT; temple.update(simT); simStep(); }
 drawOn = true; temple.update(simT);
 
-let paused = false, last = performance.now(), statT = 0;
+let paused = false, last = performance.now();
 function loop(now) {
   if (!paused) clock += Math.min(.1, (now - last) / 1000);
   last = now;
   if (!paused) frame(clock);
-  if (now - statT > 500) { stat.textContent = `${streams.length} streams · ` + vessels.map(V => Math.round(V.vol / V.cap * 100)).join(' '); statT = now; }
   requestAnimationFrame(loop);
 }
 const toggle = () => { paused = !paused; };
@@ -1206,9 +1204,6 @@ canvas.addEventListener('pointerup', release);
 canvas.addEventListener('pointercancel', release);
 addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); toggle(); }
-  else if (e.key === 'l' || e.key === 'L') document.getElementById('panel').classList.toggle('hidden');
-  else if (e.key === 'm' || e.key === 'M') setSound(!SOUND.on);
-  else if (/^[0-9]$/.test(e.key)) { const L = layers[(+e.key + 9) % 10]; if (L) { L.on = !L.on; renderPanel(); } }
 });
 requestAnimationFrame(loop);
 </script>
