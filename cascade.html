@@ -405,6 +405,59 @@ const SIDE = [-1, 1].map(s => {
 });
 const pose = {}; // current angles/phases, shared with the foreground layer
 
+// ---- bodies on axles: nothing turns them but the water ----------
+// Each has inertia, axle friction and a little ballast that pulls it back toward its rest angle;
+// water landing on it (and the weight and drag of water running over it) supplies the torque.
+function body(x, y, R, o) { return { x, y, R, a: 0, w: 0, I: 1, bal: 0, fric: .4, ...o }; }
+const BODY = {
+  d1: body(D1.x, D1.y, D1.r * 1.05 + 2, { I: 14000, bal: .3, fric: .5 }),
+  d2: SIDE.map(sd => body(sd.d2.x, sd.d2.y, sd.d2.r * 1.05 + 2, { I: 1400, bal: .4, fric: .7 })),
+  orbit: body(ORBIT.x, ORBIT.y, 0, { I: 2000, fric: .2, a: .4 }), // the ring of stones, as one wheel
+  stones: Array.from({ length: ORBIT.n }, () => body(0, 0, 9, { I: 40, fric: .3 })),
+};
+const orbitPos = k => { const a = BODY.orbit.a + k * Math.PI * 2 / ORBIT.n; return [ORBIT.x + Math.cos(a) * ORBIT.rx, ORBIT.y + Math.sin(a) * ORBIT.ry]; };
+// torque about (cx, cy) from the water within R of it: the weight of water running over a surface
+// plus its drag along the way it's flowing, and the punch of falling water where it lands
+function waterTorque(cx, cy, R) {
+  let tq = 0;
+  for (const s of streams) {
+    for (let i = 0; i < s.nd; i++) {
+      if (s.kind[i] !== 1) continue;
+      const dx = s.xs[i] - cx, dy = s.ys[i] - cy;
+      if (dx * dx + dy * dy > R * R) continue;
+      const j = Math.min(i + 1, s.nd - 1), fx = (s.xs[j] - s.xs[i]) * .6, fy = 1 + (s.ys[j] - s.ys[i]) * .6;
+      tq += s.width[i] * (dx * fy - dy * fx);
+    }
+    for (const i of s.impacts) {
+      if (i >= s.nd) break;
+      const dx = s.xs[i] - cx, dy = s.ys[i] - cy;
+      if (dx * dx + dy * dy <= R * R) tq += dx * s.width[i] * fallSpeed(s.run[i]) / 25;
+    }
+  }
+  return tq;
+}
+function spinBody(b, tq) {
+  b.w += (tq / b.I - b.bal * Math.sin(b.a) - b.fric * b.w) * DT;
+  b.a += b.w * DT;
+}
+function stepBodies() {
+  spinBody(BODY.d1, waterTorque(BODY.d1.x, BODY.d1.y, BODY.d1.R));
+  for (const b of BODY.d2) spinBody(b, waterTorque(b.x, b.y, b.R));
+  // the ring feels the water hitting each of its stones, about the ring's center
+  let ring = 0;
+  BODY.stones.forEach((st, k) => {
+    const [x, y] = orbitPos(k), present = cycle(simT, 9, k / ORBIT.n, .3, .1) > .5;
+    const own = present ? waterTorque(x, y, st.R) : 0;
+    if (present) for (const s of streams) for (const i of s.impacts) {
+      if (i >= s.nd) break;
+      const dx = s.xs[i] - x, dy = s.ys[i] - y;
+      if (dx * dx + dy * dy <= st.R * st.R) ring += (x - ORBIT.x) * s.width[i] * fallSpeed(s.run[i]) / 25;
+    }
+    spinBody(st, own);
+  });
+  spinBody(BODY.orbit, ring);
+}
+
 // ---- machines: the clockwork below the temple ----------------
 // Vessels hold water by volume: it fills them from the bottom up at any tilt and
 // pours over whichever lip ends up below the surface (see fillVessel).
@@ -558,7 +611,7 @@ layer('temple', { update(t) {
   T = this.buf;
   if (drawOn) { T.fill(0); beadIdx = 0; for (const sd of SIDE) for (const x of sd.pillars) pillar(x, 0, Math.round(ridge(x)), t); }
 
-  pose.d1 = t * .22;
+  pose.d1 = BODY.d1.a;
   raster(D1.x, D1.y, pose.d1, D1.r * 1.05, greatDiamond(t));
   if (drawOn) { beadPath(diamondRing(D1.x, D1.y, D1.r + 7, pose.d1), t); eye(D1.x, D1.y, t, 0); }
 
@@ -569,7 +622,7 @@ layer('temple', { update(t) {
 
   for (const sd of SIDE) {
     raster(sd.spring.x, sd.spring.y, 0, sd.spring.r, gemShape(sd.spring.r, GEM_SIDE, t));
-    const a = -sd.s * t * .35;
+    const a = BODY.d2[sd.s < 0 ? 0 : 1].a;
     raster(sd.d2.x, sd.d2.y, a, sd.d2.r * 1.05, tileShape(sd.d2.r, t, sd.s < 0 ? 0 : 3));
     if (drawOn) { beadPath(diamondRing(sd.d2.x, sd.d2.y, sd.d2.r + 6, a), t); eye(sd.d2.x, sd.d2.y, t, sd.s * 2); }
     // ledges dissolve away and re-form, so the water has to find a new way down
@@ -581,8 +634,8 @@ layer('temple', { update(t) {
 
   // stones orbiting the great diamond, each fading in and out on its own beat
   for (let k = 0; k < ORBIT.n; k++) {
-    const a = t * .3 + k * Math.PI * 2 / ORBIT.n;
-    raster(ORBIT.x + Math.cos(a) * ORBIT.rx, ORBIT.y + Math.sin(a) * ORBIT.ry, t * 1.2 + k, 7, gemShape(6, k & 1 ? GEM_SIDE : GEM_TOP, t), cycle(t, 9, k / ORBIT.n, .3, .1));
+    const [x, y] = orbitPos(k);
+    raster(x, y, BODY.stones[k].a + k, 7, gemShape(6, k & 1 ? GEM_SIDE : GEM_TOP, t), cycle(t, 9, k / ORBIT.n, .3, .1));
   }
 } });
 
@@ -676,15 +729,17 @@ function fillVessel(V) {
   if (V.leak) { const p = toScreen(V.x, V.y, V.ang, 0, 7); V.spill.push({ x: Math.round(p[0]), y: Math.round(p[1]), w: 1, dir: 1, excess: V.leak }); }
 }
 function vesselWater() { wmask.fill(0); for (const V of vessels) fillVessel(V); }
+// springs pour from both lower faces of their gems and surge unevenly, so the bodies below get shoved around
+const surge = (base, amp, f, ph) => t => base + amp * (Math.sin(t * f + ph) * .7 + Math.sin(t * f * 2.63 + ph * 1.7) * .3);
 const SOURCES = [
-  [CX - 3, S0.y + S0.r + 1, 5, -1], [CX + 3, S0.y + S0.r + 1, 5, 1],
-  ...SIDE.flatMap(sd => [[sd.spring.x - 2, sd.spring.y + sd.spring.r + 1, 3, -1], [sd.spring.x + 2, sd.spring.y + sd.spring.r + 1, 3, 1]]),
+  [CX - 12, S0.y + 6, 5, -1, surge(4.5, 4, .37, 0)], [CX + 12, S0.y + 6, 5, 1, surge(4.5, 4, .37, Math.PI)],
+  ...SIDE.flatMap(sd => [-1, 1].map(e => [sd.spring.x + e * 8, sd.spring.y + 5, 3, e, surge(3, 2.5, .5 + sd.s * .06, sd.s + (e > 0 ? Math.PI : 0))])),
   ...Array.from({ length: 20 }, (_, k) => { const dx = k < 10 ? -20 + k * 2 : 2 + (k - 10) * 2; return [CX + dx, LIP.y + LIP.hh + 1, 2, Math.sign(dx)]; }),
 ];
 function traceAll() {
   owner.fill(-1);
   streams = [];
-  SOURCES.forEach(([x, y, w, d], k) => trace(x, y, w, d, k));
+  SOURCES.forEach(([x, y, w, d, pulse], k) => trace(x, y, pulse ? Math.max(1, Math.round(pulse(simT))) : w, d, k));
   vessels.forEach((V, j) => V.spill.forEach((sp, k) => trace(sp.x, sp.y, sp.w, sp.dir, (SOURCES.length + j * 2 + k) % PATS.length)));
   settleFronts();
   // settle the vessels: water that ended inside one raises its level, spilling lowers it
@@ -782,7 +837,7 @@ function emit() {
   for (let j = 0; j < SPRAYN; j++) if (slife[j] > 0) { svy[j] += G_ACC * .7 * DT; sx[j] += svx[j] * DT; sy[j] += svy[j] * DT; slife[j] -= DT; if (sy[j] >= POOL) slife[j] = 0; }
   for (let k = ripples.length - 1; k >= 0; k--) if ((ripples[k].age += DT) > 1.2) ripples.splice(k, 1);
 }
-function simStep() { vesselWater(); traceAll(); stepMachines(); emit(); }
+function simStep() { vesselWater(); traceAll(); stepMachines(); stepBodies(); emit(); }
 
 const COLOFF = PATS.map((_, seed) => Array.from({ length: 12 }, (_, o) => Math.floor(h2(o, seed * 5) * 64)));
 function drawStream(s, t, i0, i1, ghost) {
