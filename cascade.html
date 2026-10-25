@@ -2,20 +2,29 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0f1c">
 <title>Cascade Mandala</title>
 <style>
   :root { --bg: #0b0f1c; }
   html, body { margin: 0; height: 100%; background: var(--bg); }
-  body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  body {
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
   canvas {
     height: min(96vh, calc(96vw * 16 / 9));
+    height: min(96dvh, calc(96vw * 16 / 9));
     aspect-ratio: 9 / 16;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     box-shadow: 0 0 60px rgba(90, 120, 255, .25);
     cursor: none;
     touch-action: none;
+  }
+  /* phones: fill the screen edge to edge; the letterbox is the same color as the scene's background */
+  @media (max-width: 600px), (pointer: coarse) {
+    canvas { height: min(100vh, calc(100vw * 16 / 9)); height: min(100dvh, calc(100vw * 16 / 9)); box-shadow: none; }
   }
 </style>
 </head>
@@ -292,15 +301,17 @@ const rain = [];
       else p += 1 + Math.floor(R() * 3);
     }
     const top = 40 + Math.floor(fbm(x * .07, 5) * 160 + R() * 40); // where it has faded out entirely
-    rain.push({ pat, top, sp: 6 + R() * 18, ph: R() * PL, a: x % 2 === 0 ? .24 : .13 });
+    const a = x % 2 === 0 ? .24 : .13, fade = new Float32Array(H); // strongest just above the lake, gone by the top
+    for (let y = top; y < POOL; y++) fade[y] = a * ((y - top) / (POOL - top)) ** .7 * Math.min(1, (POOL - y) / 12);
+    rain.push({ pat, top, fade, sp: 6 + R() * 18, ph: R() * PL });
   }
 })();
 layer('rising rain', { draw(t) {
   for (let x = 0; x < W; x++) {
-    const col = rain[x], off = Math.floor(t * col.sp + col.ph), span = POOL - col.top;
+    const col = rain[x], off = Math.floor(t * col.sp + col.ph);
     for (let y = col.top; y < POOL; y++) {
-      const ci = col.pat[mod(y + off, PL)];
-      if (ci) mix(x, y, RAIN[ci - 1], col.a * ((y - col.top) / span) ** .7 * Math.min(1, (POOL - y) / 12));
+      const ci = col.pat[(y + off) & (PL - 1)];
+      if (ci) mix(x, y, RAIN[ci - 1], col.fade[y]);
     }
   }
 } });
@@ -1206,13 +1217,16 @@ function loop(now) {
 const toggle = () => { paused = !paused; };
 const toCanvas = e => { const r = canvas.getBoundingClientRect(); return [clamp(Math.round((e.clientX - r.left) / r.width * W), 0, W - 1), clamp(Math.round((e.clientY - r.top) / r.height * H), 0, H - 1)]; };
 canvas.addEventListener('pointermove', e => {
+  if (!e.isPrimary) return;
   [HAND.tx, HAND.ty] = toCanvas(e);
   if (!HAND.on) { HAND.on = true; HAND.x = HAND.tx; HAND.y = HAND.ty; HAND.vx = HAND.vy = 0; }
 });
 canvas.addEventListener('pointerleave', () => { if (!HAND.down) HAND.on = false; });
-canvas.addEventListener('pointerdown', e => { canvas.setPointerCapture(e.pointerId); [HAND.tx, HAND.ty] = toCanvas(e); press(); });
-canvas.addEventListener('pointerup', release);
-canvas.addEventListener('pointercancel', release);
+canvas.addEventListener('pointerdown', e => { if (!e.isPrimary) return; canvas.setPointerCapture(e.pointerId); [HAND.tx, HAND.ty] = toCanvas(e); press(); });
+// a finger has no hover, so the hand goes away when it lifts
+const lift = e => { if (!e.isPrimary) return; release(); if (e.pointerType !== 'mouse') HAND.on = false; };
+canvas.addEventListener('pointerup', lift);
+canvas.addEventListener('pointercancel', lift);
 addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); toggle(); }
 });
