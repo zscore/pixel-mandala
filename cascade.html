@@ -412,7 +412,6 @@ layer('pixel rain', { draw(t) {
 const S0 = { x: CX, y: 30, r: 16 };                         // crown spring (fixed)
 const G = { x: CX, y: 228, r: 18 };                          // curtain gem (fixed)
 const LIP = { x: CX, y: 249, hw: 22, hh: 3 };                // curtain lip (fixed)
-const ORBIT = { x: CX, y: 150, rx: 82, ry: 62, n: 6 };       // orbiting stones
 const SIDE = [-1, 1].map(s => {
   const X = x => s < 0 ? x : MX(x);
   return {
@@ -433,10 +432,7 @@ function body(x, y, R, o) { return { x, y, R, a: 0, w: 0, I: 1, bal: 0, fric: .4
 const BODY = {
   d1: body(D1.x, D1.y, D1.r * 1.05 + 2, { I: 14000, bal: .3, fric: .5 }),
   d2: SIDE.map(sd => body(sd.d2.x, sd.d2.y, sd.d2.r * 1.05 + 2, { I: 1400, bal: .4, fric: .7 })),
-  orbit: body(ORBIT.x, ORBIT.y, 0, { I: 2000, fric: .2, a: .4 }), // the ring of stones, as one wheel
-  stones: Array.from({ length: ORBIT.n }, () => body(0, 0, 9, { I: 40, fric: .3 })),
 };
-const orbitPos = k => { const a = BODY.orbit.a + k * Math.PI * 2 / ORBIT.n; return [ORBIT.x + Math.cos(a) * ORBIT.rx, ORBIT.y + Math.sin(a) * ORBIT.ry]; };
 // torque about (cx, cy) from the water within R of it: the weight of water running over a surface
 // plus its drag along the way it's flowing, and the punch of falling water where it lands
 function waterTorque(cx, cy, R) {
@@ -464,19 +460,6 @@ function spinBody(b, tq) {
 function stepBodies() {
   spinBody(BODY.d1, waterTorque(BODY.d1.x, BODY.d1.y, BODY.d1.R));
   for (const b of BODY.d2) spinBody(b, waterTorque(b.x, b.y, b.R));
-  // the ring feels the water hitting each of its stones, about the ring's center
-  let ring = 0;
-  BODY.stones.forEach((st, k) => {
-    const [x, y] = orbitPos(k), present = cycle(simT, 9, k / ORBIT.n, .3, .1) > .5;
-    const own = present ? waterTorque(x, y, st.R) : 0;
-    if (present) for (const s of streams) for (const i of s.impacts) {
-      if (i >= s.nd) break;
-      const dx = s.xs[i] - x, dy = s.ys[i] - y;
-      if (dx * dx + dy * dy <= st.R * st.R) ring += (x - ORBIT.x) * s.width[i] * fallSpeed(s.run[i]) / 25;
-    }
-    spinBody(st, own);
-  });
-  spinBody(BODY.orbit, ring);
 }
 
 // ---- machines: the clockwork below the temple ----------------
@@ -737,12 +720,6 @@ layer('temple', { update(t) {
   }
 
   drawMachines(t);
-
-  // stones orbiting the great diamond, each fading in and out on its own beat
-  for (let k = 0; k < ORBIT.n; k++) {
-    const [x, y] = orbitPos(k);
-    raster(x, y, BODY.stones[k].a + k, 7, gemShape(6, k & 1 ? GEM_SIDE : GEM_TOP, t), cycle(t, 9, k / ORBIT.n, .3, .1));
-  }
 } });
 
 // ---- water: traced streams that re-route every frame as the temple moves ----------
@@ -1078,7 +1055,7 @@ layer('spray', { draw(t) {
   }
 } });
 
-// ---- foreground: sacred geometry and drifting crystals turning in front of everything ----
+// ---- foreground: sacred geometry turning in front of everything ----
 function starPoly(cx, cy, R, n, step, rot, c, a) {
   if (a <= 0) return;
   for (let k = 0; k < n; k++) {
@@ -1086,25 +1063,9 @@ function starPoly(cx, cy, R, n, step, rot, c, a) {
     line(cx + Math.cos(a0) * R, cy + Math.sin(a0) * R, cx + Math.cos(a1) * R, cy + Math.sin(a1) * R, c, a);
   }
 }
-const CRYSTALS = [
-  { x: 34, y: 372 + DY, r: 13, pal: GEM_SIDE, spin: .5, off: 0 },
-  { x: 326, y: 360 + DY, r: 15, pal: GEM_TOP, spin: -.4, off: .5 },
-  { x: 300, y: 430 + DY, r: 9, pal: GEM_LIP, spin: .7, off: .25 },
-  { x: 62, y: 436 + DY, r: 8, pal: GEM_TOP, spin: -.8, off: .75 },
-];
 layer('foreground', { draw(t) {
   starPoly(D1.x, D1.y, 136, 8, 3, t * .07, C.ley, .45 * cycle(t, 16, 0, .3, .2));
   starPoly(D1.x, D1.y, 108, 12, 5, -t * .11, C.purpleLt, .4 * cycle(t, 16, .5, .3, .2));
-  // halo of spinning tiles; a wave of appearance travels around the ring
-  for (let k = 0; k < 12; k++) {
-    const a = -t * .16 + k * Math.PI / 6;
-    const ph = clamp(Math.sin(t * 1.1 - k * Math.PI / 3) * 1.6 + .2, 0, 1);
-    raster(D1.x + Math.cos(a) * 128, D1.y + Math.sin(a) * 118, t * 1.4 + k, 9, tileShape(6, t, k), ph, false);
-  }
-  for (const c of CRYSTALS) {
-    const x = c.x + Math.sin(t * .4 + c.off * 6) * 6, y = c.y + Math.cos(t * .3 + c.off * 6) * 4;
-    raster(x, y, t * c.spin, c.r * 1.05, gemShape(c.r, c.pal, t), cycle(t, 12, c.off, .35, .15), false);
-  }
 } });
 
 // ---- glitch: occasional horizontal slip ----
