@@ -26,6 +26,7 @@
   #panel li.off { color: var(--dim); }
   #panel li.off .b { color: var(--dim); }
   #panel li:hover { color: #fff; }
+  #panel .snd { cursor: pointer; color: var(--on); margin-bottom: 6px; }
   #panel .stat { color: var(--dim); margin-top: 6px; }
 </style>
 </head>
@@ -33,6 +34,7 @@
 <canvas id="c" title="click / space to pause"></canvas>
 <div id="panel">
   <div class="hd">layers · click toggle · shift-click solo<br>1–0 keys · space pause · L hide</div>
+  <div class="snd" id="snd">♪ sound off · M</div>
   <ul id="list"></ul>
   <div class="stat" id="stat"></div>
 </div>
@@ -187,6 +189,29 @@ const tileShape = (r, t, seed) => {
     return TILE[mod((Math.floor(e) >> 1) + b + seed + 3, 7)];
   };
 };
+// bamboo: a tube with a node, and a split trough
+const BAMBOO = { lt: hex('#c8eaa0'), mid: hex('#6fbf6a'), dk: hex('#2f7d5a'), edge: hex('#14402e'), node: hex('#e6f2b4'), inside: hex('#1f5a48') };
+const bambooWall = (u, R, v, nodes) => {
+  const au = Math.abs(u);
+  if (au > R - .8) return BAMBOO.edge;
+  if (nodes.some(n => Math.abs(v - n) < 1.2)) return BAMBOO.node;
+  return u < -R + 2.2 ? BAMBOO.lt : u > R - 2.2 ? BAMBOO.dk : BAMBOO.mid;
+};
+// sōzu tube: hollow chamber from the node (v = 0) out to the mouth (v = -depth), solid butt behind the node
+const bambooTube = (R, inner, depth, butt) => (u, v) => {
+  if (Math.abs(u) > R + .5 || v < -depth - .5 || v > butt + .5) return null;
+  if (v < -.5 && Math.abs(u) < inner) return null;
+  if (v > butt - 1) return BAMBOO.edge;
+  return bambooWall(u, R, v, [0, butt * .6]);
+};
+// half of a split-bamboo trough: a floor, the middle node on its inner end, and an open outer end
+const bambooHalf = (hw, depth, side) => (u, v) => {
+  if (Math.abs(u) > hw + .5) return null;
+  if (v >= 0 && v <= 4.5) return v < 1 ? BAMBOO.lt : v > 3.5 ? BAMBOO.edge : Math.abs(Math.round(u) - side * hw * .2) < 1 ? BAMBOO.node : BAMBOO.mid;
+  if (v < 0 && v >= -depth && u * -side >= hw - 3) return u * -side >= hw - .5 || v < -depth + 1 ? BAMBOO.node : BAMBOO.dk;
+  return null;
+};
+const troughBack = (hw, depth) => (u, v) => Math.abs(u) <= hw && v < 0 && v >= -depth * .8 ? BAMBOO.inside : null;
 // a cup: floor plus two walls, pivoting about its middle
 const cupShape = (hw, depth) => (u, v) => {
   const au = Math.abs(u);
@@ -466,10 +491,15 @@ function vessel(o) {
   const V = { x: 0, y: 0, ang: 0, vol: 0, cap: 1, surf: 0, pix: [], spill: [], qin: 10, qout: 24, ...o };
   vessels.push(V); return V;
 }
-const rasterVessel = V => raster(V.x, V.y, V.ang, Math.hypot(V.hw + 1, V.depth + 6), cupShape(V.hw, V.depth));
+const rasterVessel = V => raster(V.x, V.y, V.ang, V.reach || Math.hypot(V.hw + 1, V.depth + 6), V.shape || cupShape(V.hw, V.depth));
 
-// big basin at the bottom: rocks on its own, then tips one way and pours, then the other
-const CUP = vessel({ x: CX, y: 334 + DY, hw: 32, depth: 14, qin: 3.2, qout: 4, vol: 240 });
+// double-sided pipe at the bottom: a split bamboo trough with a node in the middle, open at both ends,
+// on one pivot under its middle. Its weight sits a little above the pivot, so it rests hard against one
+// stop or the other. The low half drains out its open end; the curtain fills the raised half against
+// the node until it outweighs the rest, and the whole pipe flips over and pours out the other way.
+const PIPE = { x: CX, y: 538, hw: 31, depth: 10, lift: 6, stop: .3, th: .3, w: 0, M: 420, I: 26000 };
+PIPE.H = [-1, 1].map(s => vessel({ hw: PIPE.hw, depth: PIPE.depth, inner: PIPE.hw - 3, lips: s < 0 ? [.5, PIPE.depth] : [PIPE.depth, .5], qin: 3.2, qout: 9,
+  shape: bambooHalf(PIPE.hw, PIPE.depth, s), side: s, vol: s < 0 ? 120 : 0 }));
 // center shuttle: hangs from the chain's top run, so the chained buckets slide it back and forth
 // under the curtain, throwing the water left and right
 const SHUTTLE = { y: 318, hw: 18, reach: 66 };
@@ -481,8 +511,14 @@ SEE.B = vessel({ hw: 17, depth: 13, qin: 10, qout: 26 });
 // across the seat pushes it along; the seat hangs on its own pivot and tips under the water's weight.
 const PEND = { L: 60, hw: 13, a: .5, w: 0, tilt: 0, tw: 0 };
 const seatPos = () => [SEE.x + Math.sin(PEND.a) * PEND.L, SEE.y + Math.cos(PEND.a) * PEND.L];
-// tipping buckets (shishi-odoshi): fill, flip over and dump inward all at once, right themselves
-const TIPPERS = [-1, 1].map(s => ({ s, st: 0, w: 0, rest: s * .12, tip: -s * 1.95, V: vessel({ x: s < 0 ? 60 : MX(60), y: 362, hw: 15, depth: 16, qin: 22, qout: 34 }) }));
+// sōzu (shishi-odoshi): a bamboo tube pivoted off its balance point with its mouth up under a fall.
+// Water collects behind the node until its weight outreaches the heavy butt; the tube tips, pours,
+// and the empty butt swings back down and knocks against its rock.
+const SOZU = [-1, 1].map(s => ({
+  s, P: { x: s < 0 ? 74 : MX(74), y: 384 }, th: .75, w: 0, rest: .75, max: 2.25, M: 70, I: 420,
+  V: vessel({ hw: 6, inner: 3, depth: 26, qin: 20, qout: 40, shape: bambooTube(5, 3, 26, 16), reach: 30 }),
+}));
+const SOZU_PIV = 3, SOZU_CM = 7; // pivot sits 3px toward the mouth from the node; the empty tube's balance point 7px behind it
 // drip bowls under the upper ledges: fill, brim over both lips, and leak from a hole in the floor
 const BOWLS = [-1, 1].map(s => vessel({ x: s < 0 ? 93 : MX(93), y: 274, hw: 10, depth: 9, qin: 14, qout: 20, leak: .8 }));
 // water wheels: turned by the water running over their paddles
@@ -516,6 +552,11 @@ function placeMachines(t) {
   const ca = Math.cos(SEE.th), sa = Math.sin(SEE.th);
   for (const [V, s] of [[SEE.A, -1], [SEE.B, 1]]) { V.x = SEE.x + s * SEE.L * ca; V.y = SEE.y + s * SEE.L * sa - 1; V.ang = SEE.th * 2.1; }
   for (const c of CHAIN.B) { c.V.x = c.x; c.V.y = chainY(c); }
+  for (const z of SOZU) {
+    const a = -z.s * z.th; z.V.ang = a;
+    z.V.x = z.P.x - SOZU_PIV * Math.sin(a); z.V.y = z.P.y + SOZU_PIV * Math.cos(a);
+  }
+  for (const V of PIPE.H) { const q = toScreen(PIPE.x, PIPE.y, PIPE.th, V.side * (PIPE.hw - 1.5), -PIPE.lift); V.x = q[0]; V.y = q[1]; V.ang = PIPE.th; }
 }
 function drawMachines(t) {
   placeMachines(t);
@@ -535,7 +576,14 @@ function drawMachines(t) {
       for (let y = CHAIN.top - 9; y < SHUTTLE.y - 3; y++) put(hx, y, y & 1 ? C.shine : C.inkRim);
       line(c.x - 4, CHAIN.y0 + CHAIN.travel + 4, c.x + 4, CHAIN.y0 + CHAIN.travel + 4, C.stoneTop); // stop at the bottom
     }
-    for (const tp of TIPPERS) stand(tp.V.x, tp.V.y + 2, tp.V.y + 30, 8);
+    for (const z of SOZU) {
+      // the rock the butt knocks against, and the post carrying the axle
+      const b = toScreen(z.P.x, z.P.y, -z.s * z.rest, 0, SOZU_PIV + 16);
+      raster(b[0] + z.s * 2, b[1] + 6, 0, 7, (u, v) => { const r = u * u / 36 + v * v / 16; return r > 1 ? null : r > .7 ? C.ink : v < -1 ? C.stoneTop : C.stone1; }, 1, false);
+      for (let y = z.P.y; y < z.P.y + 28; y++) { put(z.P.x - 1, y, C.inkRim); put(z.P.x, y, C.stone0); put(z.P.x + 1, y, C.inkRim); }
+    }
+    stand(PIPE.x, PIPE.y, PIPE.y + 18, 9);
+    for (const V of PIPE.H) raster(V.x, V.y, V.ang, PIPE.hw + 2, troughBack(PIPE.hw - 3, PIPE.depth), 1, false);
     for (const wh of WHEELS) stand(wh.x, wh.y, wh.y + 36, 14);
     stand(SEE.x, SEE.y, SEE.y + 92, 10);
     const [px, py] = seatPos(), hang = toScreen(px, py, 0, 0, -9);
@@ -552,21 +600,28 @@ function drawMachines(t) {
   raster(px, py, PEND.tilt, PEND.hw + 1, stoneRect(PEND.hw, 2));
   for (const wh of WHEELS) raster(wh.x, wh.y, wh.a, wh.r + 1, wheelShape(wh.r, wh.n));
   for (const V of vessels) rasterVessel(V);
+  if (drawOn) for (const P of [...SOZU.map(z => z.P), PIPE]) { put(P.x, P.y, C.gold); put(P.x + 1, P.y, C.ink); put(P.x, P.y + 1, C.ink); }
 }
 // physics for the machines that respond to the water (runs after the water is traced)
 function stepMachines() {
-  for (const tp of TIPPERS) {
-    const V = tp.V;
-    if (tp.st === 0) {                       // filling, upright
-      V.ang += (tp.rest - V.ang) * .1;
-      if (V.vol > V.cap * .8) tp.st = 1;
-    } else if (tp.st === 1) {                // top-heavy: falls over, bounces against its stop
-      tp.w += Math.sign(tp.tip) * 7 * DT; V.ang += tp.w * DT;
-      if ((V.ang - tp.tip) * Math.sign(tp.tip) > 0) { V.ang = tp.tip; tp.w *= -.35; }
-      if (V.vol < 6) { tp.st = 2; tp.w = 0; }
-    } else {                                 // empty: the counterweight swings it back up
-      V.ang += (tp.rest - V.ang) * .035;
-      if (Math.abs(V.ang - tp.rest) < .03) tp.st = 0;
+  // sōzu: torque about the axle from the water's weight (every water pixel) against the heavy butt
+  for (const z of SOZU) {
+    const a = z.V.ang, sg = -z.s;
+    let tq = 0;
+    for (const k of z.V.pix) tq += (k % W) - z.P.x;
+    tq += z.M * -(SOZU_PIV + SOZU_CM) * Math.sin(a);
+    z.w += (sg * tq / z.I - .5 * z.w) * DT; z.th += z.w * DT;
+    if (z.th < z.rest) { if (z.w < -.6) sfx('knock', Math.min(1, -z.w / 5), z.P.x); z.th = z.rest; z.w *= -.3; }
+    if (z.th > z.max) { z.th = z.max; z.w *= -.2; }
+  }
+  // double pipe: water's weight about the pivot, plus its own weight sitting above the pivot
+  {
+    let tq = PIPE.M * PIPE.lift * Math.sin(PIPE.th);
+    for (const V of PIPE.H) for (const k of V.pix) tq += (k % W) - PIPE.x;
+    PIPE.w += (tq / PIPE.I - .8 * PIPE.w) * DT; PIPE.th += PIPE.w * DT;
+    if (Math.abs(PIPE.th) > PIPE.stop) {
+      if (Math.abs(PIPE.w) > .25) sfx('tok', Math.min(1, Math.abs(PIPE.w) / 1.5), PIPE.x + Math.sign(PIPE.th) * 60);
+      PIPE.th = Math.sign(PIPE.th) * PIPE.stop; PIPE.w *= -.25;
     }
   }
   // chained buckets: the weight difference drives the chain, friction slows it, the ends are hard stops.
@@ -633,7 +688,6 @@ layer('temple', { update(t) {
     for (const l of [sd.l1, sd.l2]) raster(l.x, l.y, 0, l.hw + 1, stoneRect(l.hw, l.hh), cycle(t, l.period, l.off, .22, .1));
   }
 
-  CUP.ang = .62 * Math.sin(t * .32) ** 3;
   drawMachines(t);
 
   // stones orbiting the great diamond, each fading in and out on its own beat
@@ -665,6 +719,8 @@ const PATS = Array.from({ length: 48 }, (_, seed) => {
 });
 
 let streams = [];
+// a bump water can brim over: one pixel high, and the surface drops back down within a couple of pixels
+const bump = (x, y, d) => !blockedW(x + d, y - 1) && !blockedW(x, y - 1) && (!blockedW(x + 2 * d, y) || !blockedW(x + 3 * d, y));
 function trace(x, y, w, dir, seed) {
   const id = streams.length;
   const s = { id, seed, xs: [], ys: [], kind: [], dir: [], tau: [], width: [], run: [], impacts: [], end: 'stuck', merge: null, nd: 0 };
@@ -691,9 +747,9 @@ function trace(x, y, w, dir, seed) {
       falling = false; moved = true;
       if (!blockedW(x + dir, y + 1)) { x += dir; y++; }
       else if (!blockedW(x + dir, y)) x += dir;
-      else if (!blockedW(x + dir, y - 1) && !blockedW(x, y - 1)) { x += dir; y--; } // brim over a 1px bump (jaggies, dissolving stone)
+      else if (bump(x, y, dir)) { x += dir; y--; } // brim over a 1px bump (jaggies, dissolving stone) — but never creep up a slope
       else if (!blockedW(x - dir, y)) { dir = -dir; x += dir; }
-      else if (!blockedW(x - dir, y - 1) && !blockedW(x, y - 1)) { dir = -dir; x += dir; y--; }
+      else if (bump(x, y, -dir)) { dir = -dir; x += dir; y--; }
       else break;
       tau += 1.3;
     }
@@ -705,7 +761,7 @@ function trace(x, y, w, dir, seed) {
 // level in world space at any tilt, and pours over any lip that ends up below it
 const rowN = new Int32Array(H);
 function fillVessel(V) {
-  const ca = Math.cos(V.ang), sa = Math.sin(V.ang), inner = V.hw - 3.5, R = Math.ceil(Math.hypot(V.hw, V.depth)) + 1;
+  const ca = Math.cos(V.ang), sa = Math.sin(V.ang), inner = V.inner ?? V.hw - 3.5, R = Math.ceil(Math.hypot(V.hw, V.depth)) + 1;
   const cx = Math.round(V.x), cy = Math.round(V.y), ya = Math.max(0, cy - R), yb = Math.min(H - 1, cy + R);
   const cav = [];
   for (let y = ya; y <= yb; y++) {
@@ -725,7 +781,8 @@ function fillVessel(V) {
   V.spill.length = 0;
   if (V.vol < 1) return;
   for (const side of [-1, 1]) {
-    const p = toScreen(V.x, V.y, V.ang, side * (V.hw - 1), -V.depth), out = toScreen(V.x, V.y, V.ang, side * (V.hw + 2), -V.depth - 1);
+    const lip = V.lips ? V.lips[side < 0 ? 0 : 1] : V.depth; // how high this end's lip stands above the floor
+    const p = toScreen(V.x, V.y, V.ang, side * (V.hw - 1), -lip), out = toScreen(V.x, V.y, V.ang, side * (V.hw + 2), -lip - 1);
     let excess = p[1] - surf;
     if (V.vol >= V.cap * .97) excess = Math.max(excess, 1.5);
     if (excess > .5) V.spill.push({ x: Math.round(out[0]), y: Math.round(out[1]), w: clamp(Math.round(excess * .7) + 1, 1, 9), dir: side * Math.sign(Math.cos(V.ang)) || side, excess });
@@ -733,6 +790,7 @@ function fillVessel(V) {
   if (V.leak || V.drain) { // a hole in the floor: a steady leak, or a drain that runs faster the fuller it is
     const p = toScreen(V.x, V.y, V.ang, 0, 7), q = (V.leak || 0) + (V.drain || 0) * V.vol / V.qout;
     V.spill.push({ x: Math.round(p[0]), y: Math.round(p[1]), w: q * V.qout > 15 ? 2 : 1, dir: 1, excess: q });
+    if (Math.random() < DT * .3 * Math.min(1, q * V.qout / 8)) sfx('bell', .5 + Math.random() * .5, V.x);
   }
 }
 function vesselWater() { wmask.fill(0); for (const V of vessels) fillVessel(V); }
@@ -787,7 +845,7 @@ function settleFronts() {
     for (let i = 0; i < nd; i++) stampNear(s.xs[i], s.ys[i]);
   }
   // a merging stream only widens the other one once its water actually gets there
-  for (const s of streams) if (s.merge && s.nd === s.xs.length) {
+  for (const s of streams) if (s.merge && s.xs.length && s.nd === s.xs.length) {
     const [o, j] = s.merge, other = streams[o], w = s.width[s.width.length - 1];
     for (let i = j; i < other.width.length; i++) other.width[i] = Math.min(11, other.width[i] + w);
   }
@@ -1012,6 +1070,80 @@ function frame(t) {
   ctx.putImageData(img, 0, 0);
 }
 
+// ============================================================
+// SOUND — the sōzu's hollow knock, the pipe's tok against its stop, and the suikinkutsu:
+// drips falling into a buried jar ring like small bells. Everything is synthesized, so the
+// same voices can be rendered offline into a soundtrack for a recording.
+// ============================================================
+const SOUND = { on: false, ctx: null, out: null, log: null };
+const IN_SCALE = [0, 1, 5, 7, 8].map(k => 2 ** (k / 12)); // miyako-bushi / in scale
+function sfx(type, vel = 1, x = CX, note) {
+  const e = { t: simT, type, vel, x, note: note ?? Math.floor(Math.random() * 10) };
+  if (SOUND.log) SOUND.log.push(e);
+  else if (SOUND.on && SOUND.ctx) voice(SOUND.ctx, SOUND.out, SOUND.ctx.currentTime + .02, e);
+}
+function soundGraph(ctx) {
+  const master = ctx.createGain(); master.gain.value = 1.6; master.connect(ctx.destination);
+  const verb = ctx.createConvolver(), ir = ctx.createBuffer(2, ctx.sampleRate * 2.8, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / ctx.sampleRate * 2.2); }
+  verb.buffer = ir;
+  const wet = ctx.createGain(); wet.gain.value = .35; verb.connect(wet).connect(master);
+  const dry = ctx.createGain(); dry.connect(master); dry.connect(verb);
+  // the bed: the falls themselves, as soft filtered noise
+  const nb = ctx.createBuffer(2, ctx.sampleRate * 4, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = nb.getChannelData(c); let b = 0; for (let i = 0; i < d.length; i++) { b = b * .97 + (Math.random() * 2 - 1) * .03; d[i] = b * 4 + (Math.random() * 2 - 1) * .15; } }
+  const src = ctx.createBufferSource(); src.buffer = nb; src.loop = true;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1400;
+  const g = ctx.createGain(); g.gain.value = .07;
+  src.connect(lp).connect(g).connect(master); src.start();
+  return dry;
+}
+function voice(ctx, out, when, e) {
+  const pan = ctx.createStereoPanner(); pan.pan.value = clamp((e.x - CX) / CX, -1, 1) * .7; pan.connect(out);
+  const tone = (f, a, dec, f1 = f) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.setValueAtTime(f, when); o.frequency.exponentialRampToValueAtTime(f1, when + dec);
+    g.gain.setValueAtTime(0, when); g.gain.linearRampToValueAtTime(a, when + .003); g.gain.exponentialRampToValueAtTime(1e-4, when + dec);
+    o.connect(g).connect(pan); o.start(when); o.stop(when + dec + .05);
+  };
+  const click = (f, a, dec) => {
+    const b = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * dec), ctx.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 3;
+    const s = ctx.createBufferSource(), bp = ctx.createBiquadFilter(), g = ctx.createGain();
+    s.buffer = b; bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = 2; g.gain.value = a;
+    s.connect(bp).connect(g).connect(pan); s.start(when);
+  };
+  const v = e.vel;
+  if (e.type === 'knock') {        // kon: hollow bamboo on stone
+    tone(540, .5 * v, .22, 470); tone(1290, .22 * v, .09); tone(2210, .08 * v, .05); click(2600, .5 * v, .025);
+  } else if (e.type === 'tok') {   // the pipe's end landing on its stop
+    tone(330, .4 * v, .16, 300); tone(860, .14 * v, .07); click(1800, .3 * v, .02);
+  } else if (e.type === 'bell') {  // a drip in the buried jar
+    const f = 880 * IN_SCALE[e.note % 5] * (e.note >= 5 ? 2 : 1);
+    tone(f, .16 * v, 2.4); tone(f * 2.76, .05 * v, .9); tone(f * 5.4, .025 * v, .35);
+  }
+}
+function setSound(on) {
+  SOUND.on = on;
+  if (on && !SOUND.ctx) { SOUND.ctx = new AudioContext(); SOUND.out = soundGraph(SOUND.ctx); }
+  if (SOUND.ctx) on ? SOUND.ctx.resume() : SOUND.ctx.suspend();
+  document.getElementById('snd').textContent = `♪ sound ${on ? 'on' : 'off'} · M`;
+}
+document.getElementById('snd').onclick = () => setSound(!SOUND.on);
+// for recordings: render the logged events into a WAV (returned as base64)
+async function renderSoundtrack(events, t0, dur) {
+  const sr = 44100, ctx = new OfflineAudioContext(2, Math.ceil(dur * sr), sr), out = soundGraph(ctx);
+  for (const e of events) if (e.t >= t0 && e.t < t0 + dur) voice(ctx, out, e.t - t0, e);
+  const buf = await ctx.startRendering(), L = buf.getChannelData(0), R = buf.getChannelData(1), n = L.length;
+  const wav = new DataView(new ArrayBuffer(44 + n * 4)), str = (o, s) => [...s].forEach((c, i) => wav.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); wav.setUint32(4, 36 + n * 4, true); str(8, 'WAVEfmt '); wav.setUint32(16, 16, true); wav.setUint16(20, 1, true); wav.setUint16(22, 2, true);
+  wav.setUint32(24, sr, true); wav.setUint32(28, sr * 4, true); wav.setUint16(32, 4, true); wav.setUint16(34, 16, true); str(36, 'data'); wav.setUint32(40, n * 4, true);
+  for (let i = 0; i < n; i++) { wav.setInt16(44 + i * 4, clamp(L[i], -1, 1) * 32767, true); wav.setInt16(46 + i * 4, clamp(R[i], -1, 1) * 32767, true); }
+  const bytes = new Uint8Array(wav.buffer); let bin = '';
+  for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  return btoa(bin);
+}
+
 // ---------- layer panel ----------
 const list = document.getElementById('list'), stat = document.getElementById('stat');
 function renderPanel() {
@@ -1052,6 +1184,7 @@ canvas.addEventListener('click', toggle);
 addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); toggle(); }
   else if (e.key === 'l' || e.key === 'L') document.getElementById('panel').classList.toggle('hidden');
+  else if (e.key === 'm' || e.key === 'M') setSound(!SOUND.on);
   else if (/^[0-9]$/.test(e.key)) { const L = layers[(+e.key + 9) % 10]; if (L) { L.on = !L.on; renderPanel(); } }
 });
 requestAnimationFrame(loop);
