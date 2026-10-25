@@ -14,7 +14,8 @@
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     box-shadow: 0 0 60px rgba(90, 120, 255, .25);
-    cursor: pointer;
+    cursor: none;
+    touch-action: none;
   }
   #panel { position: fixed; top: 12px; left: 12px; background: var(--panel); border: 1px solid #262d4e; border-radius: 6px; padding: 8px 10px; user-select: none; }
   #panel.hidden { display: none; }
@@ -31,9 +32,9 @@
 </style>
 </head>
 <body>
-<canvas id="c" title="click / space to pause"></canvas>
+<canvas id="c" title="drag a part to turn it · space to pause"></canvas>
 <div id="panel">
-  <div class="hd">layers · click toggle · shift-click solo<br>1–0 keys · space pause · L hide</div>
+  <div class="hd">layers · click toggle · shift-click solo<br>1–0 keys · space pause · L hide<br>drag a part to turn it</div>
   <div class="snd" id="snd">♪ sound off · M</div>
   <ul id="list"></ul>
   <div class="stat" id="stat"></div>
@@ -696,6 +697,112 @@ function stepMachines() {
   }
 }
 
+// ---- the hand: the cursor, a solid glove the water lands on ----------------
+// Pressing on anything on an axle takes hold of it to turn it by hand; the chain's buckets run along their chain.
+const GLOVE = { o: C.ink, w: C.white, s: hex('#b4bee6'), c: C.purpleEdge, d: C.purpleDk };
+const POINT = [
+  '....oo..........',
+  '...owwo.........',
+  '...owso.........',
+  '...owso.........',
+  '...owsooo.......',
+  '...owsowsooo....',
+  '...owsowsowsooo.',
+  'oooowsowsowsowso',
+  'owwswwwwwwwwwwso',
+  'owsswwwwwwwwwwso',
+  '.owwwwwwwwwwwwso',
+  '..owwwwwwwwwwsso',
+  '..owwwwwwwwwwso.',
+  '...owwwwwwwwsso.',
+  '...occcccccccco.',
+  '...ocdcdcdcdcdo.',
+  '...oooooooooooo.',
+];
+const FIST = [
+  '....oo.oo.......',
+  '...owsowsooo....',
+  '...owsowsowsooo.',
+  ...POINT.slice(7),
+];
+const HAND = { on: false, tx: 0, ty: 0, x: 0, y: 0, vx: 0, vy: 0, down: false, grab: null, phi: 0, turn: 0, base: 0, x0: 0, y0: 0, wet: 0 };
+
+// everything on an axle, which the hand can turn but never move: the angle it turns (with the sign
+// that makes it clockwise on screen), the axle, and hit(x, y) < 1 where the hand is touching it
+const disc = (at, r) => (x, y) => { const [px, py] = at(); return Math.hypot(x - px, y - py) / r; };
+const box = (at, hw, hh, ang = () => 0, off = 0) => (x, y) => {
+  const [px, py] = at(), a = ang(), ca = Math.cos(a), sa = Math.sin(a), dx = x - px, dy = y - py;
+  return Math.max(Math.abs(dx * ca + dy * sa) / hw, Math.abs(-dx * sa + dy * ca - off) / hh);
+};
+const pos = o => () => [o.x, o.y];
+const axle = (o, key, at, hit, sg = 1) => ({ o, key, at, hit, sg });
+const AXLES = [
+  axle(BODY.d1, 'a', pos(D1), disc(pos(D1), D1.r * .9)),
+  ...SIDE.map((sd, i) => axle(BODY.d2[i], 'a', pos(sd.d2), disc(pos(sd.d2), sd.d2.r + 2))),
+  ...WHEELS.map(wh => axle(wh, 'a', pos(wh), disc(pos(wh), wh.r + 3))),
+  axle(NORIA, 'a', pos(NORIA), disc(pos(NORIA), NORIA.R + 5)),
+  ...FLIP.map(f => axle(f, 'a', pos(f), box(pos(f), f.hw + 1, 5, () => f.a))),
+  ...SOZU.map(z => axle(z, 'th', pos(z.P), box(pos(z.P), 7, 23, () => z.V.ang, -5), -z.s)),
+  axle(PIPE, 'th', pos(PIPE), box(pos(PIPE), PIPE.hw * 2 + 2, 11, () => PIPE.th, -6)),
+  axle(SEE, 'th', pos(SEE), box(pos(SEE), SEE.L + 18, 10, () => SEE.th, -4)),
+  axle(PEND, 'a', pos(SEE), box(seatPos, PEND.hw + 1, 5, () => PEND.tilt), -1),
+];
+// the chain's buckets and the shuttle it carries don't turn, but they run along the chain:
+// along(dx, dy) is how far the hand's pull since taking hold has run the chain
+const TRACKS = [
+  ...CHAIN.B.map(c => ({ hit: box(pos(c.V), c.V.hw + 1, c.V.depth / 2 + 4, () => c.V.ang, -c.V.depth / 2), along: (dx, dy) => c.s < 0 ? dy : -dy })),
+  { hit: box(() => [pose.shuttle, SHUTTLE.y], SHUTTLE.hw + 1, 6), along: dx => -dx * CHAIN.travel / 2 / SHUTTLE.reach },
+];
+const handAngle = A => { const [px, py] = A.at(); return Math.atan2(HAND.y - py, HAND.x - px); };
+// pressing on a part takes hold of it; dragging then turns it about its axle
+function press() {
+  HAND.on = HAND.down = true;
+  HAND.x = HAND.tx; HAND.y = HAND.ty;
+  let bs = 1;
+  for (const A of [...AXLES, ...TRACKS]) { const s = A.hit(HAND.x, HAND.y); if (s < bs) { bs = s; HAND.grab = A; } }
+  if (HAND.grab && HAND.grab.along) { HAND.x0 = HAND.x; HAND.y0 = HAND.y; HAND.base = CHAIN.pos; }
+  else if (HAND.grab) { HAND.phi = handAngle(HAND.grab); HAND.turn = 0; HAND.base = HAND.grab.o[HAND.grab.key]; }
+}
+function release() { HAND.down = false; HAND.grab = null; }
+function moveHand() {
+  HAND.vx = lerp(HAND.vx, (HAND.tx - HAND.x) / DT, .5); HAND.vy = lerp(HAND.vy, (HAND.ty - HAND.y) / DT, .5);
+  HAND.x = HAND.tx; HAND.y = HAND.ty;
+  const A = HAND.grab;
+  if (A && A.along) { // run the chain toward wherever the hand has pulled it
+    const target = clamp(HAND.base + A.along(HAND.x - HAND.x0, HAND.y - HAND.y0), 0, CHAIN.travel);
+    CHAIN.v = clamp((target - CHAIN.pos) / DT, -400, 400);
+  } else if (A) { // spin it toward however far the hand has gone round the axle; let go mid-turn and it keeps spinning
+    const phi = handAngle(A);
+    HAND.turn += mod(phi - HAND.phi + Math.PI, Math.PI * 2) - Math.PI; HAND.phi = phi;
+    A.o.w = clamp((HAND.base + A.sg * HAND.turn - A.o[A.key]) / DT, -15, 15);
+  }
+}
+function drawHand() {
+  if (!HAND.on) return;
+  const rows = HAND.down ? FIST : POINT, ox = HAND.x - (HAND.down ? 8 : 4), oy = HAND.y - (HAND.down ? 8 : 0); // pressed: a fist, whether or not it caught hold of anything
+  for (let r = 0; r < rows.length; r++) for (let q = 0; q < 16; q++) {
+    const ch = rows[r][q], x = ox + q, y = oy + r;
+    if (ch === '.' || x < 0 || y < 0 || x >= W || y >= H) continue;
+    mask[y * W + x] = 1;
+    if (drawOn) put(x, y, GLOVE[ch]);
+  }
+}
+// water on the glove: a fast hand flings it off, and a wet one drips
+function handFx() {
+  if (!HAND.on) return;
+  const cx = HAND.x + (HAND.down ? 0 : 4), cy = HAND.y + (HAND.down ? 0 : 8);
+  const { vx, vy } = HAND, fast = vx * vx + vy * vy > 3600;
+  let hits = 0;
+  for (const s of streams) for (let i = 0; i < s.nd; i++) {
+    const dx = s.xs[i] - cx, dy = s.ys[i] - cy;
+    if (dx * dx > 100 || dy * dy > 121) continue;
+    hits += s.width[i];
+    if (fast && Math.random() < .12) drop(s.xs[i], s.ys[i], vx * .6 + (Math.random() - .5) * 50, vy * .6 - 30 - Math.random() * 70, .35 + Math.random() * .4, Math.random() < .3);
+  }
+  HAND.wet = Math.min(1, HAND.wet * .993 + hits * .003);
+  if (Math.random() < HAND.wet * .5) drop(cx + (Math.random() - .5) * 12, cy + 7 + Math.random() * 3, vx * .3 + (Math.random() - .5) * 6, Math.max(0, vy * .3) + 8, .4 + Math.random() * .4);
+}
+
 layer('temple', { update(t) {
   mask.fill(0);
   T = this.buf;
@@ -720,6 +827,7 @@ layer('temple', { update(t) {
   }
 
   drawMachines(t);
+  drawHand();
 } });
 
 // ---- water: traced streams that re-route every frame as the temple moves ----------
@@ -854,15 +962,16 @@ function fillVessel(V) {
 function vesselWater() { wmask.fill(0); for (const V of vessels) fillVessel(V); }
 // springs pour from both lower faces of their gems and surge unevenly, so the bodies below get shoved around
 const surge = (base, amp, f, ph) => t => base + amp * (Math.sin(t * f + ph) * .7 + Math.sin(t * f * 2.63 + ph * 1.7) * .3);
+// (positions are read live, since the hand can carry the springs off)
 const SOURCES = [
-  [CX - 12, S0.y + 6, 5, -1, surge(4.5, 4, .37, 0)], [CX + 12, S0.y + 6, 5, 1, surge(4.5, 4, .37, Math.PI)],
-  ...SIDE.flatMap(sd => [-1, 1].map(e => [sd.spring.x + e * 8, sd.spring.y + 5, 3, e, surge(3, 2.5, .5 + sd.s * .06, sd.s + (e > 0 ? Math.PI : 0))])),
-  ...Array.from({ length: 20 }, (_, k) => { const dx = k < 10 ? -20 + k * 2 : 2 + (k - 10) * 2; return [CX + dx, LIP.y + LIP.hh + 1, 2, Math.sign(dx)]; }),
+  [() => [S0.x - 12, S0.y + 6], 5, -1, surge(4.5, 4, .37, 0)], [() => [S0.x + 12, S0.y + 6], 5, 1, surge(4.5, 4, .37, Math.PI)],
+  ...SIDE.flatMap(sd => [-1, 1].map(e => [() => [sd.spring.x + e * 8, sd.spring.y + 5], 3, e, surge(3, 2.5, .5 + sd.s * .06, sd.s + (e > 0 ? Math.PI : 0))])),
+  ...Array.from({ length: 20 }, (_, k) => { const dx = k < 10 ? -20 + k * 2 : 2 + (k - 10) * 2; return [() => [LIP.x + dx, LIP.y + LIP.hh + 1], 1, Math.sign(dx)]; }),
 ];
 function traceAll() {
   owner.fill(-1);
   streams = [];
-  SOURCES.forEach(([x, y, w, d, pulse], k) => trace(x, y, pulse ? Math.max(1, Math.round(pulse(simT))) : w, d, k));
+  SOURCES.forEach(([at, w, d, pulse], k) => { const [x, y] = at(); trace(x, y, pulse ? Math.max(1, Math.round(pulse(simT))) : w, d, k); });
   vessels.forEach((V, j) => V.spill.forEach((sp, k) => trace(sp.x, sp.y, sp.w, sp.dir, (SOURCES.length + j * 2 + k) % PATS.length)));
   for (let q = 0; q < splits.length; q++) trace(...splits[q]);
   splits.length = 0;
@@ -967,7 +1076,7 @@ function emit() {
   for (let j = 0; j < SPRAYN; j++) if (slife[j] > 0) { svy[j] += G_ACC * .7 * DT; sx[j] += svx[j] * DT; sy[j] += svy[j] * DT; slife[j] -= DT; if (sy[j] >= POOL) slife[j] = 0; }
   for (let k = ripples.length - 1; k >= 0; k--) if ((ripples[k].age += DT) > 1.2) ripples.splice(k, 1);
 }
-function simStep() { vesselWater(); traceAll(); stepMachines(); stepBodies(); emit(); }
+function simStep() { vesselWater(); traceAll(); stepMachines(); stepBodies(); handFx(); emit(); }
 
 const COLOFF = PATS.map((_, seed) => Array.from({ length: 12 }, (_, o) => Math.floor(h2(o, seed * 5) * 64)));
 function drawStream(s, t, i0, i1, ghost) {
@@ -979,11 +1088,17 @@ function drawStream(s, t, i0, i1, ghost) {
     if (i >= tip || (ghost && i < i0 + 2)) { for (let o = -(w >> 1); o <= (w >> 1); o++) mix(x + o, y, C.foam, ghost ? .5 : .85); continue; }
     if (s.kind[i] === 0) {
       // falling sheet: horizontal span, extending away from the lip it left
-      const d = s.dir[i], x0 = d < 0 ? x - w + 1 : d > 0 ? x : x - (w >> 1);
+      // (cut off where it meets something solid, so a wide sheet passing beside a bucket doesn't paint over it)
+      const d = s.dir[i], x0 = d < 0 ? x - w + 1 : d > 0 ? x : x - (w >> 1), row = y * W;
+      let lo = x, hi = x;
+      if (y >= 0) {
+        while (lo > Math.max(0, x0) && !mask[row + lo - 1]) lo--;
+        while (hi < Math.min(W - 1, x0 + w - 1) && !mask[row + hi + 1]) hi++;
+      } else { lo = x0; hi = x0 + w - 1; }
       const lip = i > 0 && s.kind[i - 1] === 1;
-      for (let o = 0; o < w; o++) {
-        const c = lip ? C.foam : WATER[pat[mod(Math.floor(v * .8) + off[o], 64)]];
-        mix(x0 + o, y, c, (o === 0 || o === w - 1) && w > 2 ? .6 : .94);
+      for (let px = lo; px <= hi; px++) {
+        const o = px - x0, c = lip ? C.foam : WATER[pat[mod(Math.floor(v * .8) + off[o], 64)]];
+        mix(px, y, c, (px === lo || px === hi) && hi - lo > 1 ? .6 : .94);
       }
     } else {
       // running water: a sheet riding on top of a ledge, or hugging the outside of a slope
@@ -1002,7 +1117,10 @@ function drawStream(s, t, i0, i1, ghost) {
   for (const i of s.impacts) {
     if (i >= i1) break;
     const w = s.width[i];
-    for (let k = 0; k < w + 3; k++) if (h2(k + s.seed * 31, Math.floor(t * 12) + i) < .6) mix(s.xs[i] - ((w + 3) >> 1) + k, s.ys[i] - (k & 1), C.foam, .8);
+    for (let k = 0; k < w + 3; k++) {
+      const fx = s.xs[i] - ((w + 3) >> 1) + k, fy = s.ys[i] - (k & 1);
+      if (h2(k + s.seed * 31, Math.floor(t * 12) + i) < .6 && !(fx >= 0 && fx < W && fy >= 0 && mask[fy * W + fx])) mix(fx, fy, C.foam, .8);
+    }
   }
 }
 layer('water', { draw(t) {
@@ -1103,7 +1221,7 @@ let simT = 0;
 function advance(t) {
   // world moves in fixed 1/60s steps so the water behaves the same at any frame rate
   const n = Math.min(3, Math.floor((t - simT) / DT));
-  for (let k = 0; k < n; k++) { simT += DT; drawOn = k === n - 1; temple.update(simT); simStep(); }
+  for (let k = 0; k < n; k++) { simT += DT; drawOn = k === n - 1; moveHand(); temple.update(simT); simStep(); }
   drawOn = true;
   if (simT + DT <= t) simT = t; // fell behind (tab was hidden): skip ahead
 }
@@ -1229,7 +1347,15 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 const toggle = () => { paused = !paused; };
-canvas.addEventListener('click', toggle);
+const toCanvas = e => { const r = canvas.getBoundingClientRect(); return [clamp(Math.round((e.clientX - r.left) / r.width * W), 0, W - 1), clamp(Math.round((e.clientY - r.top) / r.height * H), 0, H - 1)]; };
+canvas.addEventListener('pointermove', e => {
+  [HAND.tx, HAND.ty] = toCanvas(e);
+  if (!HAND.on) { HAND.on = true; HAND.x = HAND.tx; HAND.y = HAND.ty; HAND.vx = HAND.vy = 0; }
+});
+canvas.addEventListener('pointerleave', () => { if (!HAND.down) HAND.on = false; });
+canvas.addEventListener('pointerdown', e => { canvas.setPointerCapture(e.pointerId); [HAND.tx, HAND.ty] = toCanvas(e); press(); });
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', release);
 addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); toggle(); }
   else if (e.key === 'l' || e.key === 'L') document.getElementById('panel').classList.toggle('hidden');
