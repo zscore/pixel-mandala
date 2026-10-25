@@ -187,8 +187,6 @@ const tileShape = (r, t, seed) => {
     return TILE[mod((Math.floor(e) >> 1) + b + seed + 3, 7)];
   };
 };
-// bamboo, for the split trough
-const BAMBOO = { lt: hex('#c8eaa0'), mid: hex('#6fbf6a'), dk: hex('#2f7d5a'), edge: hex('#14402e'), node: hex('#e6f2b4') };
 // stone sōzu tube: hollow chamber from the node (v = 0) out to the mouth (v = -depth), solid butt behind the node
 const stoneTube = (R, inner, depth, butt) => (u, v) => {
   const au = Math.abs(u);
@@ -201,11 +199,11 @@ const stoneTube = (R, inner, depth, butt) => (u, v) => {
 // half of a split-bamboo trough: a floor, the middle node on its inner end, and an open outer end
 const bambooHalf = (hw, depth, side) => (u, v) => {
   if (Math.abs(u) > hw + .5) return null;
-  if (v >= 0 && v <= 4.5) return v < 1 ? BAMBOO.lt : v > 3.5 ? BAMBOO.edge : Math.abs(Math.round(u) - side * hw * .2) < 1 ? BAMBOO.node : BAMBOO.mid;
-  if (v < 0 && v >= -depth && u * -side >= hw - 3) return u * -side >= hw - .5 || v < -depth + 1 ? BAMBOO.node : BAMBOO.dk;
+  if (v >= 0 && v <= 4.5) return v < 1 ? C.stoneTop : v > 3.5 ? C.ink : Math.abs(Math.round(u) - side * hw * .2) < 1 ? C.stone0 : C.stone1;
+  if (v < 0 && v >= -depth && u * -side >= hw - 3) return u * -side >= hw - .5 || v < -depth + 1 ? C.stoneTop : C.stone2;
   return null;
 };
-const troughBack = (hw, depth) => (u, v) => Math.abs(u) <= hw && v <= -depth + 1.5 && v >= -depth ? BAMBOO.dk : null; // the trough's far rim
+const troughBack = (hw, depth) => (u, v) => Math.abs(u) <= hw && v <= -depth + 1.5 && v >= -depth ? C.stone2 : null; // the trough's far rim
 // a cup: floor plus two walls, pivoting about its middle
 const cupShape = (hw, depth) => (u, v) => {
   const au = Math.abs(u);
