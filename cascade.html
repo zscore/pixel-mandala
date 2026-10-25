@@ -9,8 +9,8 @@
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 12px/1.4 ui-monospace, Menlo, monospace; }
   body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
   canvas {
-    height: min(96vh, calc(96vw * 1.25));
-    aspect-ratio: 360 / 450;
+    height: min(96vh, calc(96vw * 16 / 9));
+    aspect-ratio: 9 / 16;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     box-shadow: 0 0 60px rgba(90, 120, 255, .25);
@@ -37,8 +37,9 @@
   <div class="stat" id="stat"></div>
 </div>
 <script>
-const W = 360, H = 450, CX = 180, N = W * H * 4;
-const POOL = 404; // water surface of the lake
+const W = 360, H = 640, CX = 180, N = W * H * 4;
+const DY = 190;        // everything from the hills down sits this far below the original 4:5 layout
+const POOL = 404 + DY; // water surface of the lake
 const canvas = document.getElementById('c');
 canvas.width = W; canvas.height = H;
 const ctx = canvas.getContext('2d');
@@ -288,7 +289,7 @@ function layer(name, opts) {
 const skyBase = new Uint8ClampedArray(N);
 (function buildSky() {
   T = skyBase;
-  const stops = [[0, '#0a1450'], [120, '#1d3a9c'], [220, '#4f6fd0'], [285, '#a49ae0'], [335, '#f0bfc4']].map(s => [s[0], hex(s[1])]);
+  const stops = [[0, '#0a1450'], [170, '#1d3a9c'], [330, '#4f6fd0'], [455, '#a49ae0'], [525, '#f0bfc4']].map(s => [s[0], hex(s[1])]);
   for (let y = 0; y < H; y++) {
     let c = stops[stops.length - 1][1];
     for (let s = 0; s < stops.length - 1; s++) {
@@ -300,9 +301,9 @@ const skyBase = new Uint8ClampedArray(N);
     }
   }
   const cTop = hex('#fbe6cc'), cBot = hex('#e9a89c'), cRim = hex('#cdb6e6');
-  for (let y = 258; y < 340; y++) for (let x = 0; x < W; x++) {
-    const v = fbm(x * .022, y * .09) - .55 + smooth(20, 150, Math.abs(x - CX)) * .2;
-    if (v > 0) mix(x, y, v < .025 ? cRim : lerpC(cTop, cBot, (y - 258) / 82), clamp(v * 9, .35, .9));
+  for (let y = 258 + DY; y < 340 + DY; y++) for (let x = 0; x < W; x++) {
+    const v = fbm(x * .022, (y - DY) * .09) - .55 + smooth(20, 150, Math.abs(x - CX)) * .2;
+    if (v > 0) mix(x, y, v < .025 ? cRim : lerpC(cTop, cBot, (y - 258 - DY) / 82), clamp(v * 9, .35, .9));
   }
 })();
 const stars = Array.from({ length: 80 }, (_, i) => ({ x: Math.floor(h2(i, 1) * W), y: Math.floor(h2(i, 2) * 260), ph: h2(i, 3) * 6.28, sp: 1 + h2(i, 4) * 3 }));
@@ -312,16 +313,16 @@ layer('sky', { draw(t) {
 } });
 
 // ---- mountains ----------------------------------------------
-const ridge = x => 338 - 56 * Math.exp(-(((x - 40) / 32) ** 2)) - 44 * Math.exp(-(((x - 322) / 34) ** 2))
+const ridge = x => 338 + DY - 56 * Math.exp(-(((x - 40) / 32) ** 2)) - 44 * Math.exp(-(((x - 322) / 34) ** 2))
   - 18 * Math.exp(-(((x - 214) / 45) ** 2)) - 14 * Math.exp(-(((x - 128) / 30) ** 2)) - fbm(x * .08, 3) * 10;
-const hillTop = x => Math.round(366 + 5 * Math.sin(x * .035) + 4 * Math.sin(x * .083 + 2) - fbm(x * .05, 9) * 9);
+const hillTop = x => Math.round(366 + DY + 5 * Math.sin(x * .035) + 4 * Math.sin(x * .083 + 2) - fbm(x * .05, 9) * 9);
 layer('mountains', { static: true, draw() {
   const R = rng(11);
   const lit = hex('#7b97e6'), shd = hex('#3b5cc0'), snowL = hex('#f3f6ff'), snowS = hex('#b9c8f0'), haze = hex('#9fb2e8');
   for (let x = 0; x < W; x++) {
     const r = Math.round(ridge(x)), facingLeft = ridge(x + 1) - ridge(x - 1) < 0;
-    const snowLine = 312 + vnoise(x * .2, 0) * 10;
-    for (let y = r; y < 380; y++) {
+    const snowLine = 312 + DY + vnoise(x * .2, 0) * 10;
+    for (let y = r; y < 380 + DY; y++) {
       let c = facingLeft ? lit : shd;
       if (vnoise(x * .6, y * .08) > .62) c = lerpC(c, snowS, .35);
       if (y < snowLine && vnoise(x * .7, y * .1) > .32) c = facingLeft ? snowL : snowS;
@@ -341,7 +342,7 @@ layer('mountains', { static: true, draw() {
       for (let dx = -hw; dx <= hw; dx++) put(x + dx, base - h + k, hl && dx === -hw && k > 1 ? hl : c);
     }
   }
-  for (let x = -4; x < W + 4; x += 3 + Math.floor(R() * 4)) pine(x, 396 + Math.round(vnoise(x * .1, 1) * 4), 8 + Math.floor(R() * 10), hex('#1c3a8a'), hex('#2f53a8'));
+  for (let x = -4; x < W + 4; x += 3 + Math.floor(R() * 4)) pine(x, 396 + DY + Math.round(vnoise(x * .1, 1) * 4), 8 + Math.floor(R() * 10), hex('#1c3a8a'), hex('#2f53a8'));
   for (let x = -4; x < W + 4; x += 4 + Math.floor(R() * 5)) pine(x, POOL, 10 + Math.floor(R() * 16), hex('#0c1d4a'), hex('#1d5576'));
 } });
 
@@ -372,7 +373,7 @@ const rain = [];
       if (R() < dens) { const len = 1 + Math.floor(R() * 5), ci = 1 + Math.floor(R() * RAIN.length); for (let k = 0; k < len && p < PL; k++) pat[p++] = ci; p++; }
       else p += 1 + Math.floor(R() * 3);
     }
-    const end = 250 + Math.floor(fbm(x * .07, 5) * 60 + R() * 20);
+    const end = 400 + Math.floor(fbm(x * .07, 5) * 70 + R() * 20);
     rain.push({ pat, end, sp: R() < .2 ? 0 : 8 + R() * 22, ph: R() * PL, a: x % 2 === 0 ? .5 : .3 });
   }
 })();
@@ -390,7 +391,6 @@ layer('pixel rain', { draw(t) {
 const S0 = { x: CX, y: 30, r: 16 };                         // crown spring (fixed)
 const G = { x: CX, y: 228, r: 18 };                          // curtain gem (fixed)
 const LIP = { x: CX, y: 249, hw: 22, hh: 3 };                // curtain lip (fixed)
-const CUP = { x: CX, y: 334, hw: 32, depth: 14 };            // tipping basin
 const ORBIT = { x: CX, y: 150, rx: 82, ry: 62, n: 6 };       // orbiting stones
 const SIDE = [-1, 1].map(s => {
   const X = x => s < 0 ? x : MX(x);
@@ -404,10 +404,159 @@ const SIDE = [-1, 1].map(s => {
   };
 });
 const pose = {}; // current angles/phases, shared with the foreground layer
+
+// ---- machines: the clockwork below the temple ----------------
+// Vessels hold water by volume: it fills them from the bottom up at any tilt and
+// pours over whichever lip ends up below the surface (see fillVessel).
+const vessels = [];
+function vessel(o) {
+  const V = { x: 0, y: 0, ang: 0, vol: 0, cap: 1, surf: 0, pix: [], spill: [], qin: 10, qout: 24, ...o };
+  vessels.push(V); return V;
+}
+const rasterVessel = V => raster(V.x, V.y, V.ang, Math.hypot(V.hw + 1, V.depth + 6), cupShape(V.hw, V.depth));
+
+// big basin at the bottom: rocks on its own, then tips one way and pours, then the other
+const CUP = vessel({ x: CX, y: 334 + DY, hw: 32, depth: 14, qin: 3.2, qout: 4, vol: 240 });
+// center shuttle: slides back and forth under the curtain, throwing it left and right
+const SHUTTLE = { y: 318, hw: 18, reach: 66 };
+// seesaw: two buckets on a beam; the heavier side sinks, tips its bucket out and pours
+const SEE = { x: CX, y: 404, L: 52, th: 0, w: 0 };
+SEE.A = vessel({ hw: 17, depth: 13, qin: 10, qout: 26 });
+SEE.B = vessel({ hw: 17, depth: 13, qin: 10, qout: 26 });
+// swing: a pendulum hanging from the seesaw's axle, batting the curtain's middle. Water dragging
+// across the seat pushes it along; the seat hangs on its own pivot and tips under the water's weight.
+const PEND = { L: 60, hw: 13, a: .5, w: 0, tilt: 0, tw: 0 };
+const seatPos = () => [SEE.x + Math.sin(PEND.a) * PEND.L, SEE.y + Math.cos(PEND.a) * PEND.L];
+// tipping buckets (shishi-odoshi): fill, flip over and dump inward all at once, right themselves
+const TIPPERS = [-1, 1].map(s => ({ s, st: 0, w: 0, rest: s * .12, tip: -s * 1.95, V: vessel({ x: s < 0 ? 60 : MX(60), y: 362, hw: 15, depth: 16, qin: 22, qout: 34 }) }));
+// drip bowls under the upper ledges: fill, brim over both lips, and leak from a hole in the floor
+const BOWLS = [-1, 1].map(s => vessel({ x: s < 0 ? 93 : MX(93), y: 274, hw: 10, depth: 9, qin: 14, qout: 20, leak: .8 }));
+// water wheels: turned by the water running over their paddles
+const WHEELS = [-1, 1].map(s => ({ s, x: s < 0 ? 100 : MX(100), y: 458, r: 22, n: 6, a: 0, w: 0 }));
+// chained buckets: one chain over two pulleys, a bucket on each end under the outer falls.
+// The heavier one sinks and hauls the other up; at the bottom it hits a stop, tips out, and goes light.
+const CHAIN = { top: 300, y0: 336, travel: 200, pos: 0, v: 0 }; // pos: how far the left bucket has sunk
+CHAIN.B = [-1, 1].map(s => ({ s, x: s < 0 ? 22 : MX(22), V: vessel({ hw: 11, depth: 14, qin: 7, qout: 30 }) }));
+const chainY = c => CHAIN.y0 + (c.s < 0 ? CHAIN.pos : CHAIN.travel - CHAIN.pos);
+
+const wheelShape = (r, n) => (u, v) => {
+  const rr = Math.hypot(u, v);
+  if (rr > r + .5) return null;
+  if (rr < 5.5) return rr < 2.2 ? C.gold : rr > 4.5 ? C.ink : C.stoneTop;
+  const step = Math.PI * 2 / n, a = Math.atan2(v, u), da = a - Math.round(a / step) * step;
+  const along = rr * Math.cos(da), perp = rr * Math.sin(da);
+  if (along > r - 2.5 && perp > -1.5 && perp < 5.5) return along > r - .8 || perp > 4.6 ? C.ink : C.stoneTop; // paddle
+  if (Math.abs(perp) <= 1.5) return Math.abs(perp) > .8 ? C.ink : C.stone2;                                  // spoke
+  return null;
+};
+function thickLine(x0, y0, x1, y1, c, th = 1) {
+  for (let o = -th; o <= th; o++) line(x0, y0 + o, x1, y1 + o, o === -th ? C.stoneTop : o === th ? C.ink : c);
+}
+function stand(x, y, y1, hw) { // a little A-frame from an axle down to the ground behind it
+  line(x, y, x - hw, y1, C.inkRim); line(x, y, x + hw, y1, C.inkRim); line(x - hw - 2, y1, x + hw + 2, y1, C.stone1);
+}
+function placeMachines(t) {
+  pose.shuttle = CX + SHUTTLE.reach * clamp(1.35 * Math.sin(t * .55), -1, 1);
+  const ca = Math.cos(SEE.th), sa = Math.sin(SEE.th);
+  for (const [V, s] of [[SEE.A, -1], [SEE.B, 1]]) { V.x = SEE.x + s * SEE.L * ca; V.y = SEE.y + s * SEE.L * sa - 1; V.ang = SEE.th * 2.1; }
+  for (const c of CHAIN.B) { c.V.x = c.x; c.V.y = chainY(c); }
+}
+function drawMachines(t) {
+  placeMachines(t);
+  if (drawOn) {
+    // fixed fittings, drawn behind the moving parts
+    line(CX - SHUTTLE.reach - SHUTTLE.hw - 4, SHUTTLE.y + 5, CX + SHUTTLE.reach + SHUTTLE.hw + 4, SHUTTLE.y + 5, C.inkRim);
+    // the chain: down from each pulley to its bucket's bail, and across the top, links sliding as it runs
+    const link = (x, y, d) => { if (mod(d, 4) < 2.5) put(x, y, mod(d, 8) < 4 ? C.shine : C.gold); else put(x, y, C.inkRim); };
+    const [cl, cr] = CHAIN.B, run = CHAIN.pos;
+    for (let x = cl.x; x <= cr.x; x++) link(x, CHAIN.top - 9, x - cl.x + run);
+    for (const c of CHAIN.B) {
+      const yb = Math.round(chainY(c) - c.V.depth - 7);
+      for (let y = CHAIN.top - 9; y <= yb; y++) link(c.x, y, (y - CHAIN.top) * -c.s + run);
+      line(c.x, yb, c.V.x - c.V.hw + 1, chainY(c) - c.V.depth, C.inkRim); line(c.x, yb, c.V.x + c.V.hw - 1, chainY(c) - c.V.depth, C.inkRim);
+      raster(c.x, CHAIN.top - 9, run / 6 * -c.s, 7, wheelShape(6, 4), 1, false); // pulley
+      line(c.x - 4, CHAIN.y0 + CHAIN.travel + 4, c.x + 4, CHAIN.y0 + CHAIN.travel + 4, C.stoneTop); // stop at the bottom
+    }
+    for (const tp of TIPPERS) stand(tp.V.x, tp.V.y + 2, tp.V.y + 30, 8);
+    for (const wh of WHEELS) stand(wh.x, wh.y, wh.y + 36, 14);
+    stand(SEE.x, SEE.y, SEE.y + 92, 10);
+    const [px, py] = seatPos(), hang = toScreen(px, py, 0, 0, -9);
+    line(SEE.x, SEE.y, hang[0], hang[1], C.shine);
+    for (const e of [-1, 1]) { const q = toScreen(px, py, PEND.tilt, e * (PEND.hw - 2), -3); line(hang[0], hang[1], q[0], q[1], C.shine); }
+    put(hang[0], hang[1], C.gold);
+    const ca = Math.cos(SEE.th), sa = Math.sin(SEE.th);
+    thickLine(SEE.x - SEE.L * ca, SEE.y - SEE.L * sa + 6, SEE.x + SEE.L * ca, SEE.y + SEE.L * sa + 6, C.stone1);
+    eye(SEE.x, SEE.y + 1, t, 5);
+  }
+  // shuttle
+  raster(pose.shuttle, SHUTTLE.y, 0, SHUTTLE.hw + 1, stoneRect(SHUTTLE.hw, 3));
+  const [px, py] = seatPos();
+  raster(px, py, PEND.tilt, PEND.hw + 1, stoneRect(PEND.hw, 2));
+  for (const wh of WHEELS) raster(wh.x, wh.y, wh.a, wh.r + 1, wheelShape(wh.r, wh.n));
+  for (const V of vessels) rasterVessel(V);
+}
+// physics for the machines that respond to the water (runs after the water is traced)
+function stepMachines() {
+  for (const tp of TIPPERS) {
+    const V = tp.V;
+    if (tp.st === 0) {                       // filling, upright
+      V.ang += (tp.rest - V.ang) * .1;
+      if (V.vol > V.cap * .8) tp.st = 1;
+    } else if (tp.st === 1) {                // top-heavy: falls over, bounces against its stop
+      tp.w += Math.sign(tp.tip) * 7 * DT; V.ang += tp.w * DT;
+      if ((V.ang - tp.tip) * Math.sign(tp.tip) > 0) { V.ang = tp.tip; tp.w *= -.35; }
+      if (V.vol < 6) { tp.st = 2; tp.w = 0; }
+    } else {                                 // empty: the counterweight swings it back up
+      V.ang += (tp.rest - V.ang) * .035;
+      if (Math.abs(V.ang - tp.rest) < .03) tp.st = 0;
+    }
+  }
+  // chained buckets: the weight difference drives the chain, friction slows it, the ends are hard stops.
+  // The chain's own weight favors whichever side has more of it hanging, so it never stalls halfway.
+  const [cl, cr] = CHAIN.B;
+  CHAIN.v += ((cl.V.vol - cr.V.vol) / cl.V.cap * 90 + (CHAIN.pos / CHAIN.travel - .5) * 70 - CHAIN.v * 1.1) * DT;
+  CHAIN.pos += CHAIN.v * DT;
+  if (CHAIN.pos < 0 || CHAIN.pos > CHAIN.travel) { CHAIN.pos = clamp(CHAIN.pos, 0, CHAIN.travel); CHAIN.v *= -.25; }
+  for (const c of CHAIN.B) {
+    const atBottom = chainY(c) > CHAIN.y0 + CHAIN.travel - 3 && c.V.vol > 4; // knocked over by the stop
+    c.V.ang += ((atBottom ? c.s * -1.7 : 0) - c.V.ang) * (atBottom ? .06 : .1);
+  }
+  // swing: gravity and a little air drag; water running across the seat drags it along (and its
+  // weight off-center tips the seat, which sends the water running downhill, which drags it again)
+  {
+    const [px, py] = seatPos(), ca = Math.cos(PEND.tilt), sa = Math.sin(PEND.tilt);
+    let push = 0, tq = 0;
+    for (const s of streams) for (let i = 0; i < s.nd; i++) {
+      if (s.kind[i] !== 1) continue;
+      const dx = s.xs[i] - px, dy = s.ys[i] - py, u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
+      if (Math.abs(u) > PEND.hw + 1 || v < -7 || v > 1) continue;
+      tq += u / PEND.hw * s.width[i]; push += s.dir[i] * s.width[i];
+    }
+    PEND.w += (-1.7 * Math.sin(PEND.a) - .12 * PEND.w + push * .012) * DT; PEND.a += PEND.w * DT;
+    const accel = (PEND.w - (PEND.wPrev ?? PEND.w)) / DT; PEND.wPrev = PEND.w;
+    PEND.tw += (-14 * PEND.tilt - 2.5 * PEND.tw + tq * .25 - accel * .6) * DT; PEND.tilt += PEND.tw * DT;
+    if (Math.abs(PEND.tilt) > .5) { PEND.tilt = Math.sign(PEND.tilt) * .5; PEND.tw *= -.3; }
+  }
+  // seesaw: torque from the difference in water, a little spring to center it, friction
+  const tq = (SEE.B.vol - SEE.A.vol) / Math.max(1, SEE.A.cap) * 2.6 - SEE.th * 1.1 - SEE.w * 1.4;
+  SEE.w += tq * DT; SEE.th += SEE.w * DT;
+  if (Math.abs(SEE.th) > .34) { SEE.th = Math.sign(SEE.th) * .34; SEE.w *= -.2; }
+  // wheels: water running over a paddle pushes that side down
+  for (const wh of WHEELS) {
+    let tq = 0;
+    for (const s of streams) for (let i = 0; i < s.nd; i++) {
+      if (s.kind[i] !== 1) continue;
+      const dx = s.xs[i] - wh.x, dy = s.ys[i] - wh.y;
+      if (dx * dx + dy * dy <= (wh.r + 2) ** 2) tq += dx / wh.r * s.width[i];
+    }
+    wh.w += (tq * .06 - wh.w * .7) * DT; wh.a += wh.w * DT;
+  }
+}
+
 layer('temple', { update(t) {
   mask.fill(0);
   T = this.buf;
-  if (drawOn) { T.fill(0); beadIdx = 0; for (const sd of SIDE) for (const x of sd.pillars) pillar(x, 0, 300, t); }
+  if (drawOn) { T.fill(0); beadIdx = 0; for (const sd of SIDE) for (const x of sd.pillars) pillar(x, 0, Math.round(ridge(x)), t); }
 
   pose.d1 = t * .22;
   raster(D1.x, D1.y, pose.d1, D1.r * 1.05, greatDiamond(t));
@@ -427,9 +576,8 @@ layer('temple', { update(t) {
     for (const l of [sd.l1, sd.l2]) raster(l.x, l.y, 0, l.hw + 1, stoneRect(l.hw, l.hh), cycle(t, l.period, l.off, .22, .1));
   }
 
-  // the basin rocks level for a while, then tips one way and pours, then the other
-  pose.cup = .62 * Math.sin(t * .32) ** 3;
-  raster(CUP.x, CUP.y, pose.cup, CUP.hw + 2, cupShape(CUP.hw, CUP.depth));
+  CUP.ang = .62 * Math.sin(t * .32) ** 3;
+  drawMachines(t);
 
   // stones orbiting the great diamond, each fading in and out on its own beat
   for (let k = 0; k < ORBIT.n; k++) {
@@ -496,26 +644,38 @@ function trace(x, y, w, dir, seed) {
   return s;
 }
 
-// basin: a fill level that rises with inflow, stays level as the cup tips, and pours over the low lip
-const cup = { fill: .3, surf: CUP.y, pix: [], spill: [] };
-function cupWater() {
-  wmask.fill(0);
-  const ang = pose.cup, ca = Math.cos(ang), sa = Math.sin(ang), inner = CUP.hw - 3.5;
-  cup.surf = Math.round(CUP.y - cup.fill * CUP.depth);
-  cup.pix.length = 0;
-  const R = CUP.hw + 2;
-  for (let y = Math.max(cup.surf, CUP.y - R); y <= CUP.y + R; y++) for (let x = CUP.x - R; x <= CUP.x + R; x++) {
-    const dx = x - CUP.x, dy = y - CUP.y, u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
-    if (Math.abs(u) < inner && v < -.5 && v >= -CUP.depth && !mask[y * W + x]) { wmask[y * W + x] = 1; cup.pix.push(y * W + x); }
+// vessels: the water's volume fills the cavity from the lowest pixels up, so the surface stays
+// level in world space at any tilt, and pours over any lip that ends up below it
+const rowN = new Int32Array(H);
+function fillVessel(V) {
+  const ca = Math.cos(V.ang), sa = Math.sin(V.ang), inner = V.hw - 3.5, R = Math.ceil(Math.hypot(V.hw, V.depth)) + 1;
+  const cx = Math.round(V.x), cy = Math.round(V.y), ya = Math.max(0, cy - R), yb = Math.min(H - 1, cy + R);
+  const cav = [];
+  for (let y = ya; y <= yb; y++) {
+    rowN[y] = 0;
+    for (let x = Math.max(0, cx - R); x <= Math.min(W - 1, cx + R); x++) {
+      const dx = x - V.x, dy = y - V.y, u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
+      if (Math.abs(u) < inner && v < -.5 && v >= -V.depth && !mask[y * W + x]) { cav.push(y * W + x); rowN[y]++; }
+    }
   }
-  // which lip is lower, and is the water above it?
-  cup.spill.length = 0;
-  const lips = [-1, 1].map(side => ({ side, p: toScreen(CUP.x, CUP.y, ang, side * (CUP.hw - 1), -CUP.depth), out: toScreen(CUP.x, CUP.y, ang, side * (CUP.hw + 2), -CUP.depth - 1) }));
-  for (const L of lips) {
-    const excess = cup.fill >= .98 ? 1.5 : L.p[1] - cup.surf;
-    if (excess > .5) cup.spill.push({ x: Math.round(L.out[0]), y: Math.round(L.out[1]), w: clamp(Math.round(excess * .7) + 1, 1, 9), dir: L.side, excess });
+  V.cap = Math.max(1, cav.length);
+  V.vol = clamp(V.vol, 0, V.cap);
+  let need = V.vol, surf = yb + 1;
+  while (need > .5 && surf > ya) need -= rowN[--surf];
+  V.surf = surf;
+  V.pix.length = 0;
+  for (const k of cav) if (k >= surf * W) { wmask[k] = 1; V.pix.push(k); }
+  V.spill.length = 0;
+  if (V.vol < 1) return;
+  for (const side of [-1, 1]) {
+    const p = toScreen(V.x, V.y, V.ang, side * (V.hw - 1), -V.depth), out = toScreen(V.x, V.y, V.ang, side * (V.hw + 2), -V.depth - 1);
+    let excess = p[1] - surf;
+    if (V.vol >= V.cap * .97) excess = Math.max(excess, 1.5);
+    if (excess > .5) V.spill.push({ x: Math.round(out[0]), y: Math.round(out[1]), w: clamp(Math.round(excess * .7) + 1, 1, 9), dir: side * Math.sign(Math.cos(V.ang)) || side, excess });
   }
+  if (V.leak) { const p = toScreen(V.x, V.y, V.ang, 0, 7); V.spill.push({ x: Math.round(p[0]), y: Math.round(p[1]), w: 1, dir: 1, excess: V.leak }); }
 }
+function vesselWater() { wmask.fill(0); for (const V of vessels) fillVessel(V); }
 const SOURCES = [
   [CX - 3, S0.y + S0.r + 1, 5, -1], [CX + 3, S0.y + S0.r + 1, 5, 1],
   ...SIDE.flatMap(sd => [[sd.spring.x - 2, sd.spring.y + sd.spring.r + 1, 3, -1], [sd.spring.x + 2, sd.spring.y + sd.spring.r + 1, 3, 1]]),
@@ -525,20 +685,19 @@ function traceAll() {
   owner.fill(-1);
   streams = [];
   SOURCES.forEach(([x, y, w, d], k) => trace(x, y, w, d, k));
-  cup.spill.forEach((sp, k) => trace(sp.x, sp.y, sp.w, sp.dir, 40 + k));
+  vessels.forEach((V, j) => V.spill.forEach((sp, k) => trace(sp.x, sp.y, sp.w, sp.dir, (SOURCES.length + j * 2 + k) % PATS.length)));
   settleFronts();
-  // settle the basin: water that ended inside it raises the level, spilling lowers it
-  const ca = Math.cos(pose.cup), sa = Math.sin(pose.cup);
-  let inflow = 0;
+  // settle the vessels: water that ended inside one raises its level, spilling lowers it
   for (const s of streams) {
-    if (s.end !== 'stuck' || !s.xs.length || s.nd < s.xs.length) continue;
-    const dx = s.xs[s.xs.length - 1] - CUP.x, dy = s.ys[s.ys.length - 1] - CUP.y;
-    const u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
-    if (Math.abs(u) < CUP.hw && v > -CUP.depth - 4 && v < 2) inflow += s.width[s.width.length - 1];
+    const n = s.xs.length;
+    if (s.end !== 'stuck' || !n || s.nd < n) continue;
+    for (const V of vessels) {
+      const ca = Math.cos(V.ang), sa = Math.sin(V.ang), dx = s.xs[n - 1] - V.x, dy = s.ys[n - 1] - V.y;
+      const u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
+      if (Math.abs(u) < V.hw && v > -V.depth - 4 && v < 2) { V.vol += DT * s.width[n - 1] * V.qin; break; }
+    }
   }
-  let outflow = 0;
-  for (const sp of cup.spill) outflow += cup.fill >= .98 ? sp.w * .6 : sp.excess * 1.2;
-  cup.fill = clamp(cup.fill + DT * (inflow - outflow) * .004, 0, 1);
+  for (const V of vessels) for (const sp of V.spill) V.vol = Math.max(0, V.vol - DT * sp.excess * V.qout);
 }
 
 const SPEED = 50; // flow speed in path units / sec (path units shrink as falling water speeds up)
@@ -623,7 +782,7 @@ function emit() {
   for (let j = 0; j < SPRAYN; j++) if (slife[j] > 0) { svy[j] += G_ACC * .7 * DT; sx[j] += svx[j] * DT; sy[j] += svy[j] * DT; slife[j] -= DT; if (sy[j] >= POOL) slife[j] = 0; }
   for (let k = ripples.length - 1; k >= 0; k--) if ((ripples[k].age += DT) > 1.2) ripples.splice(k, 1);
 }
-function simStep() { cupWater(); traceAll(); emit(); }
+function simStep() { vesselWater(); traceAll(); stepMachines(); emit(); }
 
 const COLOFF = PATS.map((_, seed) => Array.from({ length: 12 }, (_, o) => Math.floor(h2(o, seed * 5) * 64)));
 function drawStream(s, t, i0, i1, ghost) {
@@ -662,9 +821,9 @@ function drawStream(s, t, i0, i1, ghost) {
   }
 }
 layer('water', { draw(t) {
-  // the basin's pool, surface kept level in world space
-  for (const k of cup.pix) {
-    const x = k % W, y = (k / W) | 0, depth = y - cup.surf;
+  // water standing in the vessels, surface kept level in world space
+  for (const V of vessels) for (const k of V.pix) {
+    const x = k % W, y = (k / W) | 0, depth = y - V.surf;
     const c = depth === 0 ? (h2(x, Math.floor(t * 6)) < .3 ? C.foam : WATER[5]) : depth < 3 ? WATER[3] : h2(x >> 1, y + Math.floor(t * 3)) < .08 ? WATER[4] : WATER[1 + ((x + y) & 1)];
     mix(x, y, c, .92);
   }
@@ -699,7 +858,7 @@ for (let y = 0; y < 32; y++) for (let x = 0; x < MISTL; x++) {
 }
 layer('spray', { draw(t) {
   const off = Math.floor(t * 6);
-  for (let y = 0; y < 32; y++) for (let x = 0; x < W; x++) mix(x, y + 372, C.mist, mistTex[y * MISTL + mod(x + off, MISTL)]);
+  for (let y = 0; y < 32; y++) for (let x = 0; x < W; x++) mix(x, y + POOL - 32, C.mist, mistTex[y * MISTL + mod(x + off, MISTL)]);
   for (let j = 0; j < SPRAYN; j++) if (slife[j] > 0) {
     const a = Math.min(1, slife[j] * 2.5) * .9;
     mix(sx[j], sy[j], C.foam, a);
@@ -720,10 +879,10 @@ function starPoly(cx, cy, R, n, step, rot, c, a) {
   }
 }
 const CRYSTALS = [
-  { x: 34, y: 372, r: 13, pal: GEM_SIDE, spin: .5, off: 0 },
-  { x: 326, y: 360, r: 15, pal: GEM_TOP, spin: -.4, off: .5 },
-  { x: 300, y: 430, r: 9, pal: GEM_LIP, spin: .7, off: .25 },
-  { x: 62, y: 436, r: 8, pal: GEM_TOP, spin: -.8, off: .75 },
+  { x: 34, y: 372 + DY, r: 13, pal: GEM_SIDE, spin: .5, off: 0 },
+  { x: 326, y: 360 + DY, r: 15, pal: GEM_TOP, spin: -.4, off: .5 },
+  { x: 300, y: 430 + DY, r: 9, pal: GEM_LIP, spin: .7, off: .25 },
+  { x: 62, y: 436 + DY, r: 8, pal: GEM_TOP, spin: -.8, off: .75 },
 ];
 layer('foreground', { draw(t) {
   starPoly(D1.x, D1.y, 136, 8, 3, t * .07, C.ley, .45 * cycle(t, 16, 0, .3, .2));
@@ -823,7 +982,7 @@ function loop(now) {
   if (!paused) clock += Math.min(.1, (now - last) / 1000);
   last = now;
   if (!paused) frame(clock);
-  if (now - statT > 500) { stat.textContent = `${streams.length} streams · basin ${Math.round(cup.fill * 100)}%`; statT = now; }
+  if (now - statT > 500) { stat.textContent = `${streams.length} streams · ` + vessels.map(V => Math.round(V.vol / V.cap * 100)).join(' '); statT = now; }
   requestAnimationFrame(loop);
 }
 const toggle = () => { paused = !paused; };
