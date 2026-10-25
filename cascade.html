@@ -882,6 +882,16 @@ function traceAll() {
     const V = vesselAt(x, y);
     if (V) V.vol += DT * s.width[n - 1] * V.qin;
   }
+  // water cut loose upstream still drains into the vessel it was headed for (once per vessel, so a
+  // route flickering back and forth doesn't count the same water several times over)
+  const fed = new Map();
+  for (const gh of ghosts) {
+    const s = gh.s, n = s.xs.length;
+    if (s.end !== 'stuck' || gh.end < s.tau[n - 1]) continue;
+    const V = vesselAt(s.xs[n - 1], s.ys[n - 1]);
+    if (V) fed.set(V, Math.max(fed.get(V) || 0, s.width[n - 1]));
+  }
+  for (const [V, w] of fed) V.vol += DT * w * V.qin;
   for (const V of vessels) for (const sp of V.spill) V.vol = Math.max(0, V.vol - DT * sp.excess * V.qout);
 }
 
@@ -987,6 +997,7 @@ function drawStream(s, t, i0, i1, ghost) {
   for (let i = i0; i < i1; i++) {
     const x = s.xs[i], y = s.ys[i], w = s.width[i], v = s.tau[i] - t * SPEED;
     if (ghost && (mask[y * W + x] || near[y * W + x] === stamp)) continue;
+    if (ghost && s.kind[i] === 1 && !blockedW(x, y + 1)) continue; // the surface it was running on has moved away
     if (i >= tip || (ghost && i < i0 + 2)) { for (let o = -(w >> 1); o <= (w >> 1); o++) mix(x + o, y, C.foam, ghost ? .5 : .85); continue; }
     if (s.kind[i] === 0) {
       // falling sheet: horizontal span, extending away from the lip it left
