@@ -128,21 +128,18 @@ const glint = (x, y, c) => { const d = Math.abs(x + y * .6 - SHOW.glint); return
 
 // ============================================================
 // SHAPES — every piece of the temple is a shape in its own local
-// coordinates, rasterized each frame with a rotation and a "phase"
-// (1 = solid, 0 = gone, in between = ordered-dither dissolve).
-// Solid shapes also write the collision mask the water reads.
+// coordinates, rasterized each frame with a rotation. Every shape
+// also writes the collision mask the water reads.
 // ============================================================
 const mask = new Uint8Array(W * H);
-function raster(x0, y0, ang, R, col, phase = 1, isSolid = true) {
-  if (phase <= 0) return;
+function raster(x0, y0, ang, R, col) {
   const ca = Math.cos(ang), sa = Math.sin(ang);
   const xa = Math.max(0, Math.floor(x0 - R)), xb = Math.min(W - 1, Math.ceil(x0 + R));
   const ya = Math.max(0, Math.floor(y0 - R)), yb = Math.min(H - 1, Math.ceil(y0 + R));
   for (let y = ya; y <= yb; y++) for (let x = xa; x <= xb; x++) {
-    if (phase < 1 && phase <= BAYER[(y & 3) * 4 + (x & 3)] + .5) continue;
     const dx = x - x0, dy = y - y0, c = col(dx * ca + dy * sa, -dx * sa + dy * ca);
     if (!c) continue;
-    if (isSolid) mask[y * W + x] = 1;
+    mask[y * W + x] = 1;
     if (drawOn && y >= vy0 && y < vy1) put(x, y, SHOW.glint >= 0 ? glint(x, y, c) : c);
   }
 }
@@ -164,14 +161,6 @@ function still(key, x0, y0, R, col, isSolid = true) {
   }
 }
 const toScreen = (x0, y0, ang, u, v) => [x0 + u * Math.cos(ang) - v * Math.sin(ang), y0 + u * Math.sin(ang) + v * Math.cos(ang)];
-// 1 while present → dissolves out → stays gone → dissolves back in
-function cycle(t, period, offset, gone = .25, fade = .12) {
-  const u = mod(t / period + offset, 1), on = 1 - gone - 2 * fade;
-  if (u < on) return 1;
-  if (u < on + fade) return 1 - (u - on) / fade;
-  if (u < on + fade + gone) return 0;
-  return (u - on - fade - gone) / fade;
-}
 const edgeD = (u, v, r) => r + .35 - Math.abs(u) - Math.abs(v); // distance inside a diamond's edge
 
 // a marble slab with a gold band under its face
@@ -337,6 +326,63 @@ layer('shimmer', { draw(t) {
   }
 } });
 
+// ---- window light: stained glass glowing in the towers' lancets, a halo of colored light round each,
+// candlelight flickering in the gallery's arches and through the seam of the portal's doors ----
+const LANCETS = [[42, 18, 300, 440], [30, 8, 478, 540], [54, 8, 478, 540], [42, 16, 600, 730], [42, 16, 880, 1010]];
+const WINDOWS = [];
+LANCETS.forEach(([cx, hw, top, bot], k) => {
+  const spring = top + hw * 1.73, R = 12;
+  for (const side of [-1, 1]) {
+    const wx = side < 0 ? cx : W - 1 - cx, w = { x: wx, hw, top, bot, hue: GLASS[(k * 2 + (side > 0 ? 1 : 0)) % GLASS.length], ph: k * 1.9 + side, glass: [], halo: [] };
+    for (let y = top - R * 2; y <= bot + R; y++) for (let x = wx - hw - R; x <= wx + hw + R; x++) {
+      const u = x - wx, v = y - top;
+      if (inArch(u, y, 0, hw - 2, spring + 1) && y >= top && y <= bot - 2) {
+        if (u === 0) continue; // the mullion
+        const pi = Math.floor((u + v) / 8), pj = Math.floor((u - v) / 8);
+        // diamond quarries leaded together, gold and pale toward the head, deeper jewels lower down
+        const lead = mod(u + v, 8) === 0 || mod(u - v, 8) === 0;
+        const ci = y < spring + 4 ? (h2(pi, pj) < .5 ? 2 : 5) : Math.floor(h2(pi + k * 31, pj + side * 17) * GLASS.length);
+        w.glass.push([x, y, lead ? -1 : ci, h2(pi * 3 + side, pj + k) * 9]);
+      } else if (!inArch(u, y, 0, hw, spring) || y > bot || y < top) {
+        let d = 1;
+        while (d <= R && !(inArch(u, y, 0, hw + d, spring) && y <= bot + d && y >= top - d * 1.7)) d++;
+        if (d <= R) w.halo.push([x, y, (1 - d / (R + 1)) ** 2]);
+      }
+    }
+    WINDOWS.push(w);
+  }
+});
+const ARCADE = []; // the gallery's openings, each lit by a candle at its foot
+for (let ax = 96 + 12; ax < W - 96; ax += 24) if (Math.min(ax, W - 1 - ax) > 92) {
+  const px = [];
+  for (let y = 575; y <= 700; y++) for (let x = ax - 8; x <= ax + 8; x++) if (inArch(x - ax + 12, y, 12, 7.5, 594)) px.push([x, y, Math.hypot((x - ax) * 1.6, y - 700) / 126]);
+  ARCADE.push({ px, ph: h2(ax, 5) * 20 });
+}
+const flicker = (t, ph) => .7 + .15 * Math.sin(t * 7.3 + ph) + .1 * Math.sin(t * 12.9 + ph * 2.3) + .05 * Math.sin(t * 23 + ph * 5);
+const ember = hex('#ffb84a');
+layer('window glow', { draw(t) {
+  const lit = (w, y) => clamp(.5 + .2 * Math.sin(t * .6 + w.ph) + .5 * SHOW.glass + (Math.abs(w.x + y * .6 - SHOW.glint) < 30 ? .4 : 0), 0, 1.2);
+  for (const w of WINDOWS) {
+    if (w.bot + 14 < vy0 || w.top - 30 > vy1) continue;
+    const L = lit(w, w.top), sweep = mod(t * 55 + w.ph * 40, 420) + w.top - 60; // sunlight passing down through the glass
+    for (const [x, y, ci, ph] of w.glass) {
+      if (ci < 0) { mix(x, y, C.ink, .45); continue; }
+      const s = Math.abs(y - sweep) < 10 ? 1 - Math.abs(y - sweep) / 10 : 0, tw = Math.sin(t * 1.7 + ph) > .93 ? .6 : 0;
+      mix(x, y, lerpC(GLASS[ci], C.white, clamp(.15 + .35 * L * .5 + .5 * s + tw, 0, .9)), .55 + .35 * Math.min(1, L));
+    }
+    const hc = lerpC(w.hue, C.white, .45);
+    for (const [x, y, a] of w.halo) mix(x, y, hc, a * (.12 + .25 * L));
+  }
+  for (const A of ARCADE) {
+    const f = flicker(t, A.ph);
+    for (const [x, y, d] of A.px) if (y >= vy0 && y < vy1) mix(x, y, d < .25 ? C.goldLt : ember, (1 - d) ** 2 * .75 * f);
+  }
+  if (vy1 > 1040) for (let y = Math.max(vy0, 1040); y < Math.min(vy1, POOL); y++) { // light leaking between the doors
+    const f = flicker(t, y * .05) * Math.min(1, (y - 1040) / 40);
+    for (let dx = -7; dx <= 7; dx++) mix(CX + dx, y, Math.abs(dx) < 1 ? C.goldLt : ember, f * .6 * (1 - Math.abs(dx) / 8) ** 2.5);
+  }
+} });
+
 // ---- rising motes: faint gold and blue drifting up off the lake ----------
 const PL = 256;
 const rain = [];
@@ -429,10 +475,10 @@ function spinBody(b, tq) {
 function stepBodies() {
   spinBody(BODY.d1, waterTorque(BODY.d1.x, BODY.d1.y, BODY.d1.R));
   for (const b of BODY.d2) spinBody(b, waterTorque(b.x, b.y, b.R));
-  // the censer, a pendulum on its chain: whatever water strikes it shoves it, about the top of the chain
+  // the censer, a pendulum on its chain: whatever water strikes it nudges it (never more than a nudge), about the top of the chain
   // (its angle runs the other way round from the bodies'), and someone up there keeps it gently swinging
   const C0 = CENSER, [bx, by] = censerAt();
-  C0.w += (-waterTorque(bx, by, 13, C0.x, C0.y) / C0.I - C0.bal * Math.sin(C0.a) - C0.fric * C0.w + C0.pump * Math.sign(C0.w || 1)) * DT;
+  C0.w += (clamp(-waterTorque(bx, by, 13, C0.x, C0.y) / C0.I, -1.2, 1.2) - C0.bal * Math.sin(C0.a) - C0.fric * C0.w + C0.pump * Math.sign(C0.w || 1)) * DT;
   C0.a += C0.w * DT;
 }
 
@@ -458,7 +504,6 @@ const RAMP = {
   marble: ['#ffffff', '#eafafc', '#c8eef5', '#98d6e6', '#64b4d0'].map(hex),
   gold: ['#fff3a8', '#ffd23f', '#eab030', '#c8901a', '#8c5c12'].map(hex),
   horn: ['#a8dcea', '#7cc2da', '#5aa6c4', '#3f86a8', '#2c6888'].map(hex),
-  cloud: ['#ffffff', '#f4fbff', '#e2f2fc', '#cae6f8', '#b0d8f2'].map(hex),
 };
 const LIGHT = [-.5, -.7, .75].map((c, _, l) => c / Math.hypot(...l));
 function sprite(hw, top, bot, parts, edge = C.ink, rim = hex('#4a90b0'), L = LIGHT) {
@@ -584,7 +629,7 @@ const shellShape = sprite(14, -6, 7, [ // a gold scallop, ribbed out from its hi
 ]);
 const SHELL = vessel({ x: CX, y: ANGEL.y - 98, hw: 13, depth: 5, inner: 10.5, qin: 14, qout: 40, shape: shellShape, reach: 16 });
 
-// cherubs: on clouds either side of the angel and on columns either side of the basin, each with a gold
+// cherubs: on columns either side of the basin, each with a gold
 // urn on its shoulder that it tips into the fountain as the show goes on (see direct)
 const cherubShape = dir => sprite(11, -20, 1, facing([ // drawn facing +x, flipped to face the fountain
   { in: any(ell(-6, -11, 4.5, 3.2), ell(-8, -14, 3, 2.4)), r: 2, bump: (u, v) => -.8 * fract((u + v) / 2.5) },  // a little wing behind
@@ -602,11 +647,10 @@ const urnShape = sprite(6, -10, 6, [ // upright, mouth at v = -9.5
   { in: ell(0, -9, 3.2, 1.2), m: RAMP.gold, r: 1 },
   { in: limb([[0, 4], [0, 6]], 1.8, 2.6), m: RAMP.gold, r: 1.5 },
 ], C.ink, GILT[0]);
-const cloudShape = sprite(18, -8, 6, [[-14, 2, 4], [14, 2, 4], [-9, 0, 6], [9, 0, 6], [0, -2, 7.5], [0, 3, 5]].map(([x, y, r]) => ({ in: (u, v) => v <= 5 && Math.hypot(u - x, v - y) < r, m: RAMP.cloud, r })), hex('#9fd2ee'), hex('#cfe8f8'));
-const CHERUBS = [
-  ...[-1, 1].map(s => ({ s, hi: true, x: s < 0 ? 78 : MX(78), y: 350 + FY, sp: 85 })),
-  ...[-1, 1].map(s => ({ s, hi: false, x: s < 0 ? 56 : MX(56), y: 500 + FY, sp: 75 })),
-].map(c => ({ ...c, dir: -c.s, shape: cherubShape(-c.s), pour: 0, tilt: .3 }));
+const CHERUBS = [-1, 1].map(s => ({ s, x: s < 0 ? 56 : MX(56), y: 500 + FY, sp: 75 }))
+  .map(c => ({ ...c, dir: -c.s, shape: cherubShape(-c.s), pour: 0, tilt: .3 }));
+// stone ledges out of the wall either side of the angel, a gargoyle crouched on each (see GUNS): y is the ledge's top
+const LEDGES = [-1, 1].map(s => ({ s, x: s < 0 ? 81 : MX(81), y: 351 + FY }));
 const urnAt = c => [c.x + c.dir * 8, c.y - 11]; // held up on the shoulder
 const urnAng = c => c.dir * c.tilt;
 // jets rising out of the basin: the outer pair arc over the rim of the bowl and land in it, the inner
@@ -628,14 +672,15 @@ const batWing = (sh, wr, tips, root, claw, bone = 1.4) => {
   });
   const bitten = (u, v) => bites.some(([bx, by, r]) => Math.hypot(u - bx, v - by) < r);
   return [
-    ...panels.map(P => ({ in: (u, v) => inPoly(P, u, v) && !bitten(u, v), r: 2.5, dim: 1, soft: true, bump: (u, v) => -1.5 * Math.hypot(u - wr[0], v - wr[1]) / 20 })),
-    { in: any(limb([sh, wr], bone, bone * .8), ...tips.map(p => limb([wr, p], bone * .8, .6)), limb([wr, claw], 1, .4)), r: 1.5 },
+    ...panels.map(P => ({ wing: true, in: (u, v) => inPoly(P, u, v) && !bitten(u, v), r: 2.5, dim: 1, soft: true, bump: (u, v) => -1.5 * Math.hypot(u - wr[0], v - wr[1]) / 20 })),
+    { wing: true, in: any(limb([sh, wr], bone, bone * .8), ...tips.map(p => limb([wr, p], bone * .8, .6)), limb([wr, claw], 1, .4)), r: 1.5 },
   ];
 };
 // fallen angels: white marble demons brooding on corbels down the front, after the 19th-century
 // Lucifers: seated on a rock, head bowed onto a hand, bat wings folded up behind, small horns, and
 // one eye that lights up pink. They're solid, so what runs off the rose and the towers splashes over them.
-const demonShape = dir => sprite(Math.ceil(26 * DK), Math.floor(-62 * DK), 0, facing(scaled([ // drawn facing +x (toward the middle)
+const BROOD_BOX = [Math.ceil(26 * DK), Math.floor(-62 * DK), 0]; // hw, top, bot
+const broodParts = dir => facing(scaled([ // drawn facing +x (toward the middle)
   ...batWing([-3, -34], [-12, -57], [[-25, -40], [-25, -24], [-17, -11]], [-5, -16], [-10, -61.5], 1.3),
   { in: ell(-2, -4, 13, 6), r: 3, bump: (u, v) => .8 * vnoise(u * .5 + 9, v * .5) },                      // the rock
   { in: limb([[-1, -11], [6, -7], [4, 0]], 3.4, 2.6), r: 2.5 },                                            // the far leg
@@ -649,12 +694,14 @@ const demonShape = dir => sprite(Math.ceil(26 * DK), Math.floor(-62 * DK), 0, fa
   { in: limb([[13, -21], [11.5, -35]], 2.2, 1.8), r: 2 },                                                  // forearm, the hand under the chin
   { in: ell(11, -36.5, 2.4, 1.8), r: 1.5 },
   { in: any(limb([[7.5, -43.5], [6, -47], [3, -48.5], [1.5, -46.5]], 1.4, .5), limb([[10.5, -44], [10.5, -47.5], [8, -50]], 1.2, .4)), m: RAMP.horn, r: 1 }, // horns curling back
-], DK), dir));
+], DK), dir);
+const demonShape = dir => sprite(...BROOD_BOX, broodParts(dir));
 // lower down the towers, a pair standing in the same pose with their wings half raised: an angel on the
 // left with feathered wings, a robe and a halo, and a devil on the right with bat wings, horns, goat legs
-// and a tail, its eyes lighting up with the others'. Each holds out a sword pointing in to the middle: what runs
-// off its wings pools on the blade against the guard, and when the blade is full it dips the point and
-// pours it all out (see SWORDS).
+// and a tail, its eyes lighting up with the others'. Each holds out a sword pointing in to the middle, and
+// they duel: every few seconds one raises its sword and shoots a jet of water across at the other, which
+// answers half a beat later. What runs off their wings pools on the blades against the guards in between,
+// and goes out with the next shot (see SWORDS).
 const PW_TOP = a => a < 17 ? lerp(-56, -84, ((a - 5) / 12) ** 2 * (3 - 2 * (a - 5) / 12)) : lerp(-84, -63, ((a - 17) / 27) ** 1.2);
 const PW_BOT = a => PW_TOP(a) + (a < 17 ? lerp(10, 25, (a - 5) / 12) : lerp(25, 4, (a - 17) / 27)) + 2.5 * Math.abs(Math.sin(a * Math.PI / 5));
 const PAIR_HAND = [-19, -46]; // the sword hand, out on the -u side
@@ -693,10 +740,22 @@ const DEMONS = [
   ...[-1, 1].map(s => ({ x: s < 0 ? 118 : MX(118), y: 715, dir: -s, kind: 'brood' })), // in the gallery under the rose, catching what runs off it
   { x: 48, y: 860, kind: 'angel', s: 1 }, { x: MX(48), y: 860, kind: 'devil', s: -1 }, // on the towers, between the windows (s: the side the sword's held out on)
 ].map(d => ({ ...d, shape: d.kind === 'brood' ? demonShape(d.dir) : PAIR[d.kind === 'angel' ? 0 : 1] }));
+// the brooding ones drink in whatever lands on their wings, and once they've taken in enough they spit it
+// out of their mouths at the middle (see direct and traceAll). WINGS marks each one's wing pixels (its index + 1).
+const BROOD = DEMONS.filter(d => d.kind === 'brood').map(d => ({ d, vol: 0, spit: false, wait: 0 }));
+const BROOD_MOUTH = [23, -63], BROOD_SPIT = [95, 85]; // a little in front of its lips; the spit's speed in toward the middle, and up
+const WINGS = new Uint8Array(W * H);
+BROOD.forEach((B, k) => {
+  const P = broodParts(B.d.dir), [hw, top, bot] = BROOD_BOX;
+  for (let v = top; v <= bot; v++) for (let u = -hw; u <= hw; u++) {
+    let front = null; for (const p of P) if (p.in(u, v)) front = p; // the part you see there
+    if (front && front.wing) WINGS[(B.d.y + v) * W + B.d.x + u] = k + 1;
+  }
+});
 
 // the swords: vessels on a pivot at the hand. Blade along u with the point toward the side s it's held out on, the
 // guard nearer the hand; the guard dams the water while the point is raised and the point is open, so lowering it pours.
-const SWORD_HW = 14, GRIP = 18, SWORD_AIM = .15, SWORD_RATE = 110, SWORD_SP = 230; // aim: the point raised this much to shoot; rate: water spent a second
+const SWORD_HW = 14, GRIP = 18, SWORD_AIM = .67, SWORD_RATE = 110, SWORD_VX = 230; // aim: the point raised this much to shoot; rate: water spent a second; vx: the jet's speed across
 const swordShape = (devil, s) => sprite(24, -8, 8, facing([ // carved with the point at -u, turned to point toward s
   { in: (u, v) => u >= -SWORD_HW && u < 13 && v >= 0 && v <= (devil ? 3 + (mod(u, 4) < 2 ? 1 : 0) : 3) - Math.max(0, -9 - u) * .65, m: devil ? RAMP.horn : RAMP.marble, r: 1.5, // the blade, flat along the top
     mark: (u, v) => !devil && u > -9 && u < 11 && Math.abs(v - 1.5) < .6 ? 1 : 0 },                       // its fuller
@@ -705,7 +764,7 @@ const swordShape = (devil, s) => sprite(24, -8, 8, facing([ // carved with the p
   { in: ell(22.5, 1.5, 2, 2.2), m: RAMP.gold, r: 1.5 },                                                   // pommel
 ], -s));
 const SWORDS = DEMONS.filter(d => d.s).map(d => ({
-  d, th: .3, pour: false, wait: 0, shape: swordShape(d.kind === 'devil', d.s),
+  d, th: .3, pour: false, shape: swordShape(d.kind === 'devil', d.s),
   hand: [d.x - d.s * PAIR_HAND[0], d.y + PAIR_HAND[1]],
   V: vessel({ hw: SWORD_HW, depth: 7, inner: 13, qin: 22, qout: 9, sword: true, lips: d.s < 0 ? [0, 6.5] : [6.5, 0], reach: 26 }),
 }));
@@ -718,6 +777,12 @@ function placeSwords() {
     V.x = S.hand[0] - gx; V.y = S.hand[1] - gy;
   }
 }
+// a shot: from the point of the raised sword, the jet's velocity to land it on the other one's chest
+function swordJet(S) {
+  const s = S.d.s, foe = DEMONS.find(d => d.s === -s), [px, py] = toScreen(...S.hand, -s * SWORD_AIM, s * (SWORD_HW + 2 + GRIP), -2.5);
+  const T = Math.abs(foe.x - px) / SWORD_VX;
+  return [px, py, s * SWORD_VX, (foe.y - 50 - py - .5 * G_ACC * T * T) / T];
+}
 function drawSwords() { for (const S of SWORDS) raster(S.V.x, S.V.y, S.V.ang, 26, S.shape); }
 // gothic features standing out from the front: hood moulds over the windows, the gallery's arcade and the
 // portal (water landing on one runs down both sides of the arch and drips off the label stops at its
@@ -726,15 +791,24 @@ const HOODS = [
   ...[42, MX(42)].flatMap(cx => [
     { cx, hw: 18, spring: 331, sill: 443 }, { cx, hw: 22, spring: 504, sill: 543 }, { cx, hw: 16, spring: 628, sill: 733 },
     { cx, hw: 16, spring: 908, sill: 1013 }, { cx, hw: 22, spring: 1110 }]),
-  ...[108, 132, 156, 204, 228, 252].map(cx => ({ cx, hw: 7.5, spring: 594, t: 3 })), // the gallery's arcade
+  ...[108, 132, 156, 204, 228, 252].map(cx => ({ cx, hw: 7.5, spring: 594, t: 3, stops: false })), // the gallery's arcade (plain ends, so water drips between them)
+  // a cascade of little arches under each side of the rose, rows staggered by half a span: what drains off the
+  // wheel lands on the top one's point, parts down both sides and drips off its ends onto the two below, and
+  // so spreads out row by row down onto the arcade
+  ...[[500, [118]], [522, [106, 130]], [544, [94, 118, 142]], [566, [106, 130]]].flatMap(([spring, xs]) =>
+    xs.flatMap(x => [x, MX(x)]).map(cx => ({ cx, hw: 5, spring, t: 3 }))),
   { cx: CX, hw: 75, spring: 964, gap: 26 },                                           // the great portal, open at the apex for the curtain
 ];
-const hoodShape = ({ cx, hw, spring, t = 4, gap = 0 }) => (u, v) => {
+const hoodShape = ({ cx, hw, spring, t = 4, gap = 0, stops = true }) => (u, v) => {
   const x = cx + u, y = spring + v, au = Math.abs(u), arch = h => inArch(x, y, cx, h, spring);
   if (au < gap) return null;
   if (v <= 0) {
     if (!arch(hw + t) || arch(hw)) return null;
     return !arch(hw + t - .9) ? C.ink : !arch(hw + t - 1.9) ? C.white : !arch(hw + t - 2.7) ? C.gold : !arch(hw + .9) ? MARB[2] : C.ink;
+  }
+  if (!stops) { // plain ends
+    if (v > 3 || au < hw || au > hw + t) return null;
+    return v > 2 || au < hw + .9 || au > hw + t - .9 ? C.ink : MARB[1];
   }
   if (v > 5 || au < hw || au > hw + t + (v > 2 ? 3 : 0)) return null; // the label stops, turned outward
   return v > 4 || au < hw + .9 || au > hw + t + 2.1 ? C.ink : v < 3 && au > hw + t - .9 ? C.white : MARB[1];
@@ -753,14 +827,15 @@ function drawFeatures() {
 }
 
 // spouts that join the show partway through (see direct): herald angels by the rose blowing gold
-// trumpets, and horned gargoyles down by the lake that turn their heads to sweep,
-// and every so often dip them to dump their water straight down. The jets fly real arcs and carry on as
-// ordinary water wherever they land. a: aim above the horizontal, toward the middle (negative is up).
+// trumpets, and horned gargoyles crouched on ledges by the fountain that sweep their heads and every
+// so often duck them to dump their water down. The jets fly real arcs and carry on as ordinary water
+// wherever they land. a: aim above the horizontal, toward the middle (negative is up); sweep: how far
+// it swings either side; duck: the angle it ducks to.
 const GUN_LEN = 16; // from the pivot to the mouth, or the trumpet's bell
 const GUNS = [
   ...[-1, 1].map(s => ({ s, kind: 'angel', x: s < 0 ? 98 : MX(98), y: 446, aim: -.45, sp: 265, w: 3, at: 9.5 })),
-  ...[-1, 1].map(s => ({ s, kind: 'gargoyle', x: s < 0 ? 9 : MX(9), y: 572 + FY, aim: -1.3, sp: 330, w: 3, at: 2.6 })),
-].map(g => ({ ...g, show: 0, power: 0, a: g.aim }));
+  ...LEDGES.map(l => ({ s: l.s, kind: 'gargoyle', x: l.x - l.s * 6, y: l.y - 9, aim: -.3, sp: 95, w: 2, at: 4.2, sweep: .15, duck: .4 })), // claws on the ledge, spitting into the bowl
+].map(g => ({ sweep: .32, ...g, power: 0, a: g.aim }));
 const gunAng = g => g.s < 0 ? g.a : Math.PI - g.a;
 // a gargoyle reaching out of the wall, facing +u, jaws open round the line v = 0 at the mouth
 const GARGOYLE = [
@@ -817,19 +892,18 @@ const trumpet = sprite(GUN_LEN + 1, -5, 5, [ // flaring to its bell at u = GUN_L
 ], GILT[0], GILT[3]);
 function drawGuns() {
   for (const g of GUNS) {
-    if (g.show <= 0) continue;
-    if (g.kind === 'gargoyle') { raster(g.x, g.y, gunAng(g), 26, g.s < 0 ? gargoyle : gargoyleR, g.show); continue; }
+    if (g.kind === 'gargoyle') { raster(g.x, g.y, gunAng(g), 26, g.s < 0 ? gargoyle : gargoyleR); continue; }
     const fx = g.x + g.s * 2, fy = g.y + 28; // the angel stands just behind its trumpet, on a bracket in the wall
-    raster(fx, fy + 3, 0, 9, stoneRect(7, 2), g.show);
-    const H1 = HERALD[g.s < 0 ? 0 : 1]; raster(fx, fy, 0, H1.R, H1, g.show);
-    raster(g.x, g.y, gunAng(g), GUN_LEN + 2, trumpet, g.show);
+    raster(fx, fy + 3, 0, 9, stoneRect(7, 2));
+    const H1 = HERALD[g.s < 0 ? 0 : 1]; raster(fx, fy, 0, H1.R, H1);
+    raster(g.x, g.y, gunAng(g), GUN_LEN + 2, trumpet);
   }
 }
 
 // a gold censer swinging on a long chain across the curtain: when it swings through, the curtain parts
 // round it and splashes off to the sides, and the water knocks it about; out at the ends of its swing the
 // curtain falls clean. bal: gravity (G_ACC) over the chain's length; pump: the push that keeps it swinging
-const CENSER = { x: CX, y: 590, L: 100, a: .2, w: 0, I: 9000, bal: 4.2, fric: .25, pump: 0 };
+const CENSER = { x: CX, y: 590, L: 100, a: .2, w: 0, I: 3000, bal: 4.2, fric: .3, pump: 0 };
 const censerShape = sprite(10, -13, 9, [
   { in: (u, v) => v < -10 && Math.abs(Math.hypot(u, v + 11.5) - 1.6) < .9, m: RAMP.gold, r: 1 },                   // the ring the chain hangs from
   { in: (u, v) => v <= -2 && Math.hypot(u, (v + 2) * 1.1) <= 8.5, m: RAMP.gold, r: 4, mark: (u, v) => v < -4 && mod(u + 1, 4) < 1 && mod(v, 3) < 1 ? 3 : 0 }, // a domed, pierced lid
@@ -853,9 +927,9 @@ function drawMachines(t) {
   still('stem', CX, 491 + FY, 52, column(6, 50));                   // the stem between the tiers
   still('plinth', CX, 412 + FY, 14, stoneRect(12, 8, 7));           // the angel's plinth
   still('angel', ANGEL.x, ANGEL.y, angelShape.R, angelShape);
+  LEDGES.forEach((l, k) => still('ledge' + k, l.x, l.y + 3, 18, stoneRect(15, 3, 3 + k)));
   CHERUBS.forEach((c, k) => {
-    if (c.hi) still('cloud' + k, c.x, c.y + 7, cloudShape.R, cloudShape);
-    else still('column' + k, c.x, 548 + FY, 48, column(7, 46));
+    still('column' + k, c.x, 548 + FY, 48, column(7, 46));
     still('cherub' + k, c.x, c.y, c.shape.R, c.shape);
     const [ux, uy] = urnAt(c);
     raster(ux, uy, urnAng(c), 12, urnShape);
@@ -1037,7 +1111,7 @@ function vesselAt(x, y) {
   for (const V of vessels) {
     const ca = Math.cos(V.ang), sa = Math.sin(V.ang), dx = x - V.x, dy = y - V.y;
     const u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
-    if (Math.abs(u) < V.hw && v > -V.depth - 4 && v < 2) return V;
+    if (Math.abs(u) < V.hw + (V.sword ? 10 : 0) && v > -V.depth - 4 && v < 2) return V; // (what runs up against a sword's hilt is caught by it too)
   }
   return null;
 }
@@ -1089,6 +1163,7 @@ function trace(x, y, w, dir, seed, from = null, jet = null) {
     }
     s.xs.push(x); s.ys.push(y); s.tau.push(tau); s.width.push(w); s.run.push(run);
     s.kind.push(falling ? 0 : 1); s.dir.push(moved ? dir : 0);
+    if (y >= 0 && y + 1 < H && WINGS[(y + 1) * W + x]) { s.end = 'sink'; s.sink = WINGS[(y + 1) * W + x] - 1; break; } // drunk in by a demon's wing
     if (!blockedW(x, y + 1)) {
       if (!falling) run = 0;
       falling = true; run++; y++;
@@ -1104,7 +1179,7 @@ function trace(x, y, w, dir, seed, from = null, jet = null) {
             const h = w >> 1, cx = x - dir, cy = blockedW(cx, y + 1) ? y : y + 1;
             w -= h;
             splits.push([cx, cy, h, -dir, (seed + 17) % PATS.length, [id, s.xs.length - 1, tau]]);
-          }
+          } else if (dl) dir = h2(x * 7 + y, Math.floor(simT * .9 + h2(x, y) * 5)) < .5 ? -1 : 1; // too thin to part on a point: it tips one way, then every so often the other, like a pachinko pin
         } else if (fl !== fr) dir = fl ? -1 : 1;
       }
       falling = false; moved = true;
@@ -1170,7 +1245,7 @@ function traceAll() {
   streams = [];
   SOURCES.forEach(([at, w, d, pulse], k) => { const [x, y] = at(); trace(x, y, pulse ? Math.max(1, Math.round(pulse(simT))) : w, d, k); });
   GUNS.forEach((g, k) => { // a gun that's only just opened sputters: a thin jet that droops short
-    if (g.power < .08 || g.show < 1) return;
+    if (g.power < .08) return;
     const a = gunAng(g), [mx, my] = toScreen(g.x, g.y, a, GUN_LEN + 2, 0), sp = g.sp * g.power;
     trace(Math.round(mx), Math.round(my), g.power > .6 ? g.w : g.power > .3 ? 2 : 1, Math.sign(Math.cos(a)), (k * 11 + 5) % PATS.length, null, [sp * Math.cos(a), sp * Math.sin(a)]);
   });
@@ -1179,10 +1254,15 @@ function traceAll() {
     const a = urnAng(c), [ux, uy] = urnAt(c), [mx, my] = toScreen(ux, uy, a, 0, -11), sp = c.sp * c.pour;
     trace(Math.round(mx), Math.round(my), c.pour > .85 ? 2 : 1, c.dir, (k * 7 + 3) % PATS.length, null, [Math.sin(a) * sp, -Math.cos(a) * sp]);
   });
-  SWORDS.forEach((S, k) => { // shot out of the point along the blade
-    if (!S.shoot || S.V.vol < 1) return;
-    const V = S.V, s = S.d.s, [px, py] = toScreen(V.x, V.y, V.ang, s * (SWORD_HW + 2), -1);
-    trace(Math.round(px), Math.round(py), V.vol > 25 ? 3 : 2, s, (k * 17 + 7) % PATS.length, null, [s * Math.cos(SWORD_AIM) * SWORD_SP, -Math.sin(SWORD_AIM) * SWORD_SP - 30]); // along its aim, so the arc holds steady
+  BROOD.forEach((B, k) => { // spat out of a demon's mouth
+    if (!B.spit) return;
+    const d = B.d;
+    trace(d.x + d.dir * BROOD_MOUTH[0], d.y + BROOD_MOUTH[1], 2, d.dir, (k * 19 + 3) % PATS.length, null, [d.dir * BROOD_SPIT[0], -BROOD_SPIT[1]]);
+  });
+  SWORDS.forEach((S, k) => { // shot out of the point at the other one, wider for what the blade had caught
+    if (!S.shoot) return;
+    const [px, py, vx, vy] = swordJet(S);
+    trace(Math.round(px), Math.round(py), S.V.vol > 25 ? 3 : 2, S.d.s, (k * 17 + 7) % PATS.length, null, [vx, vy]);
   });
   CROWN.forEach((g, k) => { // spat in from the towers' tops, in spurts
     if (g.power < .1) return;
@@ -1215,6 +1295,7 @@ function traceAll() {
   }
   for (const [V, w] of fed) V.vol += DT * w * V.qin;
   for (const V of vessels) for (const sp of V.spill) V.vol = Math.max(0, V.vol - DT * sp.excess * V.qout);
+  for (const s of streams) if (s.end === 'sink' && s.nd === s.xs.length) BROOD[s.sink].vol += DT * s.width[s.xs.length - 1] * 10;
 }
 
 const SPEED = 50; // flow speed in path units / sec (path units shrink as falling water speeds up)
@@ -1324,10 +1405,14 @@ function fountainFx() {
   // the shell over the angel's head bubbles up, spitting little drops off its surface
   if (SHELL.vol > SHELL.cap * .5) for (let k = 0; k < 2; k++) if (Math.random() < .6)
     drop(SHELL.x + (Math.random() - .5) * 12, SHELL.surf - 2, (Math.random() - .5) * 50, -40 - Math.random() * 80, .3 + Math.random() * .5, Math.random() < .5);
+  for (const B of BROOD) { // and a demon starting to spit
+    if (B.spit && !B.spat) { const d = B.d; for (let k = 0; k < 20; k++) { const a = Math.atan2(-BROOD_SPIT[1], d.dir * BROOD_SPIT[0]) + (Math.random() - .5) * .8, v = 50 + Math.random() * 110; drop(d.x + d.dir * BROOD_MOUTH[0], d.y + BROOD_MOUTH[1], Math.cos(a) * v, Math.sin(a) * v, .5 + Math.random() * .4, Math.random() < .5); } }
+    B.spat = B.spit;
+  }
   for (const S of SWORDS) { // a sword starting to shoot throws a spray off its point
     if (S.shoot && !S.shot) {
-      const V = S.V, s = S.d.s, [px, py] = toScreen(V.x, V.y, V.ang, s * (SWORD_HW + 2), -1);
-      for (let k = 0; k < 30; k++) { const a = Math.atan2(Math.sin(V.ang) * s - .13, Math.cos(V.ang) * s) + (Math.random() - .5) * .7, v = 80 + Math.random() * 150; drop(px, py, Math.cos(a) * v, Math.sin(a) * v, .5 + Math.random() * .5, Math.random() < .5); }
+      const [px, py, vx, vy] = swordJet(S);
+      for (let k = 0; k < 30; k++) { const a = Math.atan2(vy, vx) + (Math.random() - .5) * .7, v = 80 + Math.random() * 150; drop(px, py, Math.cos(a) * v, Math.sin(a) * v, .5 + Math.random() * .5, Math.random() < .5); }
     }
     S.shot = S.shoot;
   }
@@ -1422,6 +1507,32 @@ layer('water', { draw(t) {
   for (const s of streams) drawStream(s, t, 0, s.nd, false);
 } });
 
+// ---- window beams: rays of colored light fanning down out of each lancet over the front, motes of dust
+// turning in them ----
+const BEAM = 170; // how far a window's light falls
+const BEAM_MOTES = WINDOWS.map((w, k) => Array.from({ length: 14 }, (_, j) => { const R = rng(2200 + k * 50 + j); return { u: R() * 2 - 1, d: R() * BEAM, vy: 3 + R() * 6, f: .8 + R() * 2, ph: R() * 9 }; }));
+layer('window beams', { draw(t) {
+  WINDOWS.forEach((w, k) => {
+    const y0 = w.bot - 2, half = w.hw - 2;
+    if (y0 > vy1 || y0 + BEAM < vy0) return;
+    const L = clamp(.45 + .2 * Math.sin(t * .6 + w.ph) + .6 * SHOW.glass, 0, 1.2);
+    for (let y = Math.max(vy0, y0); y < Math.min(vy1, y0 + BEAM, POOL); y++) {
+      const d = y - y0, spread = half + d * .32, fall = (1 - d / BEAM) ** 1.6;
+      for (let x = Math.ceil(w.x - spread); x <= w.x + spread; x++) {
+        const u = (x - w.x) / spread, src = Math.round(u * half / 3); // which strip of glass this ray left from
+        const streak = .45 + .55 * Math.max(0, Math.sin(src * 2.1 + k + t * .4 + d * .01));
+        mix(x, y, lerpC(GLASS[mod(src + k, GLASS.length)], C.white, .5), .2 * L * fall * streak * (1 - u * u));
+      }
+    }
+    for (const m of BEAM_MOTES[k]) {
+      const d = mod(m.d + t * m.vy, BEAM), y = y0 + d, x = w.x + m.u * (half + d * .32) + Math.sin(t * .9 + m.ph) * 2;
+      if (y < vy0 || y >= vy1) continue;
+      const b = .5 + .5 * Math.sin(t * m.f + m.ph);
+      mix(x, y, C.goldLt, b * L * (1 - d / BEAM) * .9);
+    }
+  });
+} });
+
 // ---- holy light: shafts slanting down over the front, a beam on the angel, a glory behind the crown at
 // the finale, glitter drifting down through it all, and star flares popping off the gold ----
 const SHAFTS = [-40, 70, 170, 250, 360].map((x, k) => ({ x, w: [30, 22, 42, 26, 34][k], ph: k * 1.7 })); // where each crosses the middle row
@@ -1438,7 +1549,7 @@ function flare(x, y, k, len) { // a four-point star with fainter diagonals
   }
 }
 const FLARES = () => [[S0.x, S0.y - 14], [LIP.x, LIP.y - 16], ...SIDE.map(sd => [sd.spring.x, sd.spring.y - 9]), [D1.x - 44, D1.y - 40], [D1.x + 52, D1.y + 28],
-  [CX, ANGEL.y - 104], [CX - 52, BOWL.y - 11], [CX + 92, BASIN.y - 14], ...CHERUBS.map(c => [c.x + c.dir * 8, c.y - 21]), ...DEMONS.map(d => [d.x, d.y + 1]), censerAt(), ...GUNS.filter(g => g.kind === 'angel' && g.show > .5).map(g => toScreen(g.x, g.y, gunAng(g), GUN_LEN, 0))];
+  [CX, ANGEL.y - 104], [CX - 52, BOWL.y - 11], [CX + 92, BASIN.y - 14], ...CHERUBS.map(c => [c.x + c.dir * 8, c.y - 21]), ...DEMONS.map(d => [d.x, d.y + 1]), censerAt(), ...GUNS.filter(g => g.kind === 'angel' && g.power > .5).map(g => toScreen(g.x, g.y, gunAng(g), GUN_LEN, 0))];
 layer('holy light', { draw(t) {
   const y1 = Math.min(vy1, POOL);
   for (let y = vy0; y < y1; y++) { // shafts, breathing slowly and fading toward the lake
@@ -1623,11 +1734,10 @@ async function renderSoundtrack(events, t0, dur) {
 //    always: shafts of light breathing over the front, glitter falling, star flares off the gold
 //    1s gold light sweeps the marble
 //    1.5s the lower cherubs tip their urns     2.5s the angel's halo flares and her beam brightens
-//    2.6s gargoyles by the lake appear, fire at 3.6 / 4.4 into the basin, later ducking to splash down
 //    3.2s jets rise out of the basin
-//    4.2s the cherubs on the clouds pour     5.5s the inner jets     4.5–14s the camera climbs to the top
+//    5.2s the gargoyles on the ledges by the fountain fire at 5.2 / 6 into the bowl, sweeping and ducking     5.5s the inner jets     4.5–14s the camera climbs to the top
 //    6–7.5s the censer swings wider across the curtain     7.5s the demons' eyes light up
-//    9.5s herald angels appear either side of the rose, trumpet at 10.5 / 11.3 on it
+//    10.5s the herald angels either side of the rose trumpet at it (the left at 10.5, the right at 11.3)
 //    11s the angels sweep, rocking the rose      12.5s the rose's glass lights up
 //    12.6s the gargoyles on the towers' tops start barking water in sprays up over the gable
 //    14.4s a glory of light opens behind the crown     14.8s finale: gold sweep, bursts of spray at 15.2 / 15.8 / 16.4
@@ -1647,39 +1757,42 @@ function direct(t) {
   SHOW.glass = ramp(u, 12.5, 13.2, 16.4, 17.4);
   SHOW.glory = ramp(u, 14.4, 15.2, 16.6, 17.6);
   for (const c of CHERUBS) {
-    c.pour = ramp(u, c.hi ? 4.2 : 1.5, c.hi ? 4.9 : 2.2, 25.2, 26);
+    c.pour = ramp(u, 1.5, 2.2, 25.2, 26);
     c.tilt = .3 + 1.6 * c.pour + .12 * c.pour * Math.sin(u * 2.2 + c.x);
   }
   SPOUTS.forEach((p, k) => p.power = ramp(u, k < 2 ? 3.2 : 5.5, k < 2 ? 3.8 : 6.1, 25.2, 26));
   for (const g of GUNS) {
-    const late = g.s > 0 ? .8 : 0, at = g.at, off = g.kind === 'angel' ? 0 : 8.6; // the heralds stop with the crown, the gargoyles by the lake once the camera's back down
-    g.show = ramp(u, at + late, at + late + .8, 17 + off, 17.8 + off);
+    const late = g.s > 0 ? .8 : 0, at = g.at, off = g.kind === 'angel' ? 0 : 8.6; // the heralds stop with the crown, the gargoyles on the ledges once the camera's back down
     g.power = ramp(u, at + late + 1, at + late + 1.6, 16.4 + off, 17 + off);
-    const sweep = ramp(u, at + 1.5, at + 2.5, 15.5 + off, 16.5 + off) * (g.kind === 'angel' ? .32 : .3);
+    const sweep = ramp(u, at + 1.5, at + 2.5, 15.5 + off, 16.5 + off) * g.sweep;
     g.a = g.aim + sweep * Math.sin((u - at) * 2.1 + (g.s > 0 ? Math.PI : 0)); // each pair sweeps against itself, so what they hit rocks
     if (g.kind === 'gargoyle') { // every few seconds a gargoyle ducks its head and dumps its water straight down
       const d = mod(u + (g.s > 0 ? 1.4 : 0) + g.y * .01, 4.2), dip = d > 2.8 ? Math.sin((d - 2.8) / 1.4 * Math.PI) : 0;
-      g.a = lerp(g.a, 1.05, dip * ramp(u, at + 2, at + 2.5, 15.8 + off, 16.4 + off));
+      g.a = lerp(g.a, g.duck, dip * ramp(u, at + 2, at + 2.5, 15.8 + off, 16.4 + off));
     }
   }
-  CENSER.pump = .05 + .14 * ramp(u, 6, 7.5, 24, 25.2);
+  CENSER.pump = .06 + .06 * ramp(u, 6, 7.5, 24, 25.2);
   for (const g of CROWN) { // they bark: a short hard burst about every 1.2s, the right one half a beat behind. A bark is
     // on or off at one speed, so its water flies one arc and carries on along it once the bark stops
     const late = g.s > 0 ? .4 : 0, beat = mod(u / 1.2 + (g.s > 0 ? .5 : 0), 1);
     g.power = u > 12.6 + late && u < 16.6 && beat < .35 ? 1 : 0;
   }
-  // the swords are held point up while they fill; once one brims over (or has stood a while with some in it)
-  // it's levelled at the middle and the water shoots out of the point (see traceAll) until it's spent
-  for (const S of SWORDS) {
-    const V = S.V;
-    S.wait += DT;
-    if (!S.pour && S.wait > 2 && ((V.spill.length && V.vol > 10) || (S.wait > 8 && V.vol > 15))) S.pour = true;
-    else if (S.pour && V.vol < 3) { S.pour = false; S.wait = 0; }
-    S.th += ((S.pour ? SWORD_AIM : .3 + .04 * Math.sin(u * 1.1 + S.d.s)) - S.th) * (1 - Math.exp(-DT * (S.pour ? 6 : 1.2)));
-    S.shoot = S.pour && Math.abs(S.th - SWORD_AIM) < .06;
-    if (S.shoot) V.vol = Math.max(0, V.vol - DT * SWORD_RATE);
-  }
+  // the swords duel: every 3.5s the angel raises its sword at the devil and shoots for a second and a half,
+  // and the devil answers half a beat later (see traceAll); in between they're held point up, catching water
+  SWORDS.forEach((S, k) => {
+    const beat = mod(u / 3.5 + k * .5, 1);
+    S.pour = beat < .45;
+    S.th += ((S.pour ? SWORD_AIM : .3 + .04 * Math.sin(u * 1.1 + S.d.s)) - S.th) * (1 - Math.exp(-DT * (S.pour ? 8 : 2)));
+    S.shoot = S.pour && beat > .08; // once it's up
+    if (S.shoot) S.V.vol = Math.max(0, S.V.vol - DT * SWORD_RATE);
+  });
   placeSwords();
+  for (const B of BROOD) { // a demon spits once it's drunk enough off its wings, until it's spat it all out
+    B.wait += DT;
+    if (!B.spit && (B.vol > 40 || (B.vol > 12 && B.wait > 6))) B.spit = true;
+    else if (B.spit && B.vol < 1) { B.spit = false; B.wait = 0; }
+    if (B.spit) B.vol = Math.max(0, B.vol - DT * 45);
+  }
 }
 
 const params = new URLSearchParams(location.search);
