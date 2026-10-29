@@ -1851,14 +1851,15 @@ async function renderSoundtrack(events, t0, dur) {
 //    1s gold light sweeps the marble
 //    1.5s the lower cherubs tip their urns     2.5s the angel's halo flares and her beam brightens
 //    3.2s jets rise out of the basin
-//    5.2s the gargoyles on the ledges by the fountain fire at 5.2 / 6 into the bowl, sweeping and ducking     5.5s the inner jets     3–12.5s the camera climbs to the top
+//    5.2s the gargoyles on the ledges by the fountain fire at 5.2 / 6 into the bowl, sweeping and ducking     5.5s the inner jets     2.7–15.2s the camera climbs to the top
 //    6–7.5s the censer swings wider across the curtain     7.5s the demons' eyes light up
 //    10.5s the herald angels either side of the rose trumpet at it (the left at 10.5, the right at 11.3)
 //    11s the angels sweep, rocking the rose      12.5s the rose's glass lights up
 //    12.6s the gargoyles on the towers' tops start barking water in sprays up over the gable
 //    14.4s a glory of light opens behind the crown     14.8s finale: gold sweep, bursts of spray at 15.2 / 15.8 / 16.4
 //    16.4–17.6 the crown shuts off (the heralds, the glass, the glory, the barking gargoyles)
-//    16.8–26.3 the camera sinks back down     24–26.6 everything below winds down as it gets there
+//    15.2–16.2 the camera holds on the crown, then sinks back down until 1.7s, holding a second on the fountain
+//    24–26.6 everything below winds down as it gets there
 // ============================================================
 const LOOP = 27, T0 = 8; // T0: the world pre-runs this long before the show starts
 const ramp = (u, a0, a1, b0, b1) => clamp(Math.min((u - a0) / (a1 - a0), (b1 - u) / (b1 - b0)), 0, 1); // 0 → 1 over a0..a1, 1 → 0 over b0..b1
@@ -1866,7 +1867,8 @@ const ease = k => k * k * (3 - 2 * k);
 const SHOW = { u: 0, glint: -1, halo: 0, evil: 0, glass: 0, glory: 0, cam: 0 };
 function direct(t) {
   const u = SHOW.u = mod(t - T0, LOOP);
-  SHOW.cam = u < 3 ? 0 : u < 12.5 ? ease((u - 3) / 9.5) : u < 16.8 ? 1 : u < 26.3 ? 1 - ease((u - 16.8) / 9.5) : 0; // up and down alike
+  const c = mod(u - 2.7, LOOP); // up and down alike, holding a second at each end
+  SHOW.cam = c < 12.5 ? ease(c / 12.5) : c < 13.5 ? 1 : c < 26 ? 1 - ease((c - 13.5) / 12.5) : 0;
   SHOW.glint = u > 1 && u < 2 ? (u - 1) * 1400 - 40 : u > 14.8 && u < 15.8 ? (u - 14.8) * 1400 - 40 : -1;
   SHOW.halo = ramp(u, 2.5, 3, 5, 6);
   SHOW.evil = ramp(u, 7.5, 8.2, 24.4, 25.4) * (.75 + .25 * Math.sin(u * 5));
