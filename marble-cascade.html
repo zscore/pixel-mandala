@@ -29,7 +29,7 @@
 </style>
 </head>
 <body>
-<canvas id="c" title="drag a part to turn it · space to pause"></canvas>
+<canvas id="c" title="drag a part to turn it · scroll or drag to look up and down · space to pause"></canvas>
 <script>
 const W = 360, H = 1280, CX = 180, N = W * H * 4;
 const VIEW = 640;      // the canvas is a 9:16 window onto the 9:32 cathedral front, panned up and down by the show
@@ -1761,11 +1761,24 @@ function advance(t) {
   drawOn = true;
   if (simT + DT <= t) simT = t; // fell behind (tab was hidden): skip ahead
 }
+// the camera: where the show has it, or held at ?cam= (0 is the top), or the whole front with ?view=full
+const showCam = () => FULL ? 0 : params.has('cam') ? clamp(+params.get('cam'), 0, H - VIEW) : Math.round((1 - SHOW.cam) * (H - VIEW));
+// ...unless the viewer has scrolled it: then it stays where they put it (flung on a little by a flick), and once
+// they've left it alone a while it glides back into the show
+const SCROLL = { y: null, v: 0, idle: 0, t: 0, drag: null };
+function scrollTo(y) { SCROLL.y = clamp(y, 0, H - VIEW); SCROLL.idle = 0; }
 function frame(t) {
-  advance(t);
-  // the camera: where the show has it, or held at ?cam= (0 is the top), or the whole front with ?view=full
-  camY = FULL ? 0 : params.has('cam') ? clamp(+params.get('cam'), 0, H - VIEW) : Math.round((1 - SHOW.cam) * (H - VIEW));
+  const dt = clamp(t - SCROLL.t, 0, .1); SCROLL.t = t;
+  if (SCROLL.y !== null && !SCROLL.drag) {
+    if (SCROLL.v) { SCROLL.y = clamp(SCROLL.y + SCROLL.v * dt, 0, H - VIEW); SCROLL.v *= Math.exp(-dt * 4); if (Math.abs(SCROLL.v) < 5) SCROLL.v = 0; }
+    if ((SCROLL.idle += dt) > 8) {
+      const to = showCam(); SCROLL.y += (to - SCROLL.y) * (1 - Math.exp(-dt * 2));
+      if (Math.abs(to - SCROLL.y) < 1) SCROLL.y = null;
+    }
+  }
+  camY = FULL || SCROLL.y === null ? showCam() : Math.round(SCROLL.y);
   vy0 = camY; vy1 = FULL ? H : camY + VIEW;
+  advance(t);
   for (let i = vy0 * W * 4, e = vy1 * W * 4; i < e; i += 4) { O[i] = 223; O[i + 1] = 244; O[i + 2] = 255; O[i + 3] = 255; }
   for (const L of layers) {
     if (!L.on) continue;
@@ -1941,17 +1954,40 @@ const toggle = () => { paused = !paused; };
 const toCanvas = e => { const r = canvas.getBoundingClientRect(); return [clamp(Math.round((e.clientX - r.left) / r.width * W), 0, W - 1), clamp(Math.round((e.clientY - r.top) / r.height * canvas.height) + camY, 0, H - 1)]; };
 canvas.addEventListener('pointermove', e => {
   if (!e.isPrimary) return;
+  const D = SCROLL.drag;
+  if (D) { // dragging the front itself pulls it up and down under the finger
+    const now = performance.now(), y = D.cam - (e.clientY - D.y) / canvas.getBoundingClientRect().height * VIEW;
+    if (now > D.t) D.v = lerp(D.v, (y - (SCROLL.y ?? y)) / ((now - D.t) / 1000), .5);
+    D.t = now; scrollTo(y);
+  }
   [HAND.tx, HAND.ty] = toCanvas(e);
   if (!HAND.on) { HAND.on = true; HAND.x = HAND.tx; HAND.y = HAND.ty; HAND.vx = HAND.vy = 0; }
 });
 canvas.addEventListener('pointerleave', () => { if (!HAND.down) HAND.on = false; });
-canvas.addEventListener('pointerdown', e => { if (!e.isPrimary) return; canvas.setPointerCapture(e.pointerId); [HAND.tx, HAND.ty] = toCanvas(e); press(); });
+canvas.addEventListener('pointerdown', e => {
+  if (!e.isPrimary) return;
+  canvas.setPointerCapture(e.pointerId); [HAND.tx, HAND.ty] = toCanvas(e); press();
+  if (!HAND.grab && !FULL) { SCROLL.drag = { y: e.clientY, cam: camY, t: performance.now(), v: 0 }; SCROLL.v = 0; } // nothing to turn here: drag to scroll
+});
 // a finger has no hover, so the hand goes away when it lifts
-const lift = e => { if (!e.isPrimary) return; release(); if (e.pointerType !== 'mouse') HAND.on = false; };
+const lift = e => {
+  if (!e.isPrimary) return;
+  release(); if (e.pointerType !== 'mouse') HAND.on = false;
+  const D = SCROLL.drag; SCROLL.drag = null;
+  if (D && performance.now() - D.t < 80) SCROLL.v = clamp(D.v, -2500, 2500); // a flick carries on
+};
+addEventListener('wheel', e => {
+  e.preventDefault();
+  if (FULL) return;
+  SCROLL.v = 0;
+  scrollTo((SCROLL.y ?? camY) + e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1) / canvas.getBoundingClientRect().height * VIEW);
+}, { passive: false });
 canvas.addEventListener('pointerup', lift);
 canvas.addEventListener('pointercancel', lift);
 addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); toggle(); }
+  const step = { ArrowUp: -40, ArrowDown: 40, PageUp: -VIEW * .8, PageDown: VIEW * .8, Home: -H, End: H }[e.code];
+  if (step && !FULL) { e.preventDefault(); SCROLL.v = 0; scrollTo((SCROLL.y ?? camY) + step); }
 });
 requestAnimationFrame(loop);
 </script>
