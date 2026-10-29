@@ -80,6 +80,7 @@
 
   .foot { display: flex; flex-wrap: wrap; gap: 4px; padding: 12px 14px; }
   .foot button { flex: 1; }
+  .fresh { padding-top: 0; }
   kbd { font: inherit; color: var(--text); border: 1px solid var(--line); padding: 0 3px; }
   .keys { color: var(--dim); padding: 0 14px 14px; margin: 0; line-height: 1.8; }
 
@@ -118,10 +119,12 @@
   <div class="foot">
     <button id="export" title="Download your creation as a .json file">Save .json</button>
     <button id="import" title="Open a creation saved as .json">Open .json</button>
-    <button id="reset" class="danger" title="Back to the original temple (undoable)">Reset</button>
-    <button id="clear" class="danger" title="Remove every part (undoable)">Clear</button>
     <input type="file" id="file" accept="application/json,.json" hidden>
   </div>
+  <section class="fresh">
+    <h2>Start fresh</h2>
+    <div class="row" id="templates"></div>
+  </section>
   <p class="keys"><kbd>drag</kbd> move · <kbd>←↑→↓</kbd> nudge · <kbd>⌫</kbd> delete · <kbd>⌘D</kbd> duplicate · <kbd>M</kbd> mirror · <kbd>Esc</kbd> deselect · <kbd>space</kbd> pause</p>
 </aside>
 <script>
@@ -1036,6 +1039,23 @@ const DEFAULT_SCENE = [
   { type: 'ledge', x: CX - 23, y: 491, hw: 19, hh: 2, ang: 25.8, period: 0, off: 0 }, { type: 'ledge', x: CX + 23, y: 491, hw: 19, hh: 2, ang: -25.8, period: 0, off: 0 },
 ];
 
+// a small starting point: one spring down the center column through a few machines
+const BASIC_SCENE = [
+  { type: 'spring', x: CX, y: 30, r: 16, gem: 'top', flow: 4.5, amp: 4, freq: .37, phase: 0 },
+  { type: 'diamond', x: CX, y: 150, r: 50, face: 'circuit', seed: 0, I: 14000, bal: .3, fric: .5 },
+  { type: 'gem', x: CX, y: 228, r: 18, gem: 'lip' },
+  { type: 'curtain', x: CX, y: 249, hw: 22, hh: 3 },
+  { type: 'noria', x: CX, y: 356, R: 27, n: 8 },
+  { type: 'ledge', x: CX - 23, y: 491, hw: 19, hh: 2, ang: 25.8, period: 0, off: 0 }, { type: 'ledge', x: CX + 23, y: 491, hw: 19, hh: 2, ang: -25.8, period: 0, off: 0 },
+  { type: 'pipe', x: CX, y: 540, hw: 31, depth: 13 },
+];
+
+const TEMPLATES = [
+  { label: 'Basic', scene: BASIC_SCENE, title: 'A small starter scene' },
+  { label: 'Full cascade', scene: DEFAULT_SCENE, title: 'The whole original temple' },
+  { label: 'Blank', scene: [], title: 'An empty scene with no parts' },
+];
+
 let parts = [], nextId = 1;
 const partSig = (type, p) => { const { x, y, type: _, ...rest } = { ...TYPES[type].defaults, ...p }; return type + JSON.stringify(Object.entries(rest).sort()); };
 function build(e) { e.inst = TYPES[e.type].create(e.p); e.inst.p = e.p; }
@@ -1798,16 +1818,20 @@ $('file').onchange = async () => {
     ED.sel = null; record();
   } catch { flash('That file isn’t a cascade scene.'); }
 };
-$('reset').onclick = () => { cancelPlacing(); loadScene(DEFAULT_SCENE); record(); flash('Back to the original temple · ⌘Z to undo'); };
-$('clear').onclick = () => { cancelPlacing(); loadScene([]); ED.sel = null; record(); flash('Cleared · ⌘Z to undo'); };
+for (const T of TEMPLATES) {
+  const b = document.createElement('button');
+  b.textContent = T.label; b.title = `${T.title} (undoable)`; b.className = 'danger';
+  b.onclick = () => { cancelPlacing(); loadScene(T.scene); ED.sel = null; record(); flash(`Started fresh from ${T.label} · ⌘Z to undo`); };
+  $('templates').append(b);
+}
 
 const params = new URLSearchParams(location.search);
 if (params.has('only')) { const want = params.get('only').split(','); layers.forEach(L => L.on = want.includes(L.name)); }
 
-// the scene saved in this browser, or the original temple (?fresh starts from the original)
+// the scene saved in this browser, or the basic starter (?fresh starts from the starter, ?full from the whole temple)
 let saved = null;
 try { saved = JSON.parse(localStorage.getItem(STORE)); } catch {}
-loadScene(Array.isArray(saved) && !params.has('fresh') ? saved.filter(o => o && TYPES[o.type]) : DEFAULT_SCENE);
+loadScene(params.has('full') ? DEFAULT_SCENE : Array.isArray(saved) && !params.has('fresh') ? saved.filter(o => o && TYPES[o.type]) : BASIC_SCENE);
 
 // pre-run the world a few seconds so the water is already flowing on load
 let clock = +(params.get('t') || 6);

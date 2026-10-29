@@ -10,8 +10,9 @@ space pauses.
 `editor.html` is an editable version: the panel on the right adds parts
 (springs, ledges, diamonds, wheels, sōzu, water guns, fountains, …) and edits the selected one; drag
 parts around the scene and the water re-routes live. Scenes save in the browser
-and can be downloaded and reopened as .json files. `?fresh` starts from the
-original temple.
+and can be downloaded and reopened as .json files. New visitors start from a
+small basic scene; the Start fresh buttons swap to Basic, the full original
+cascade, or a blank scene. `?fresh` starts from Basic and `?full` from the full cascade.
 
 `index.html` is the earlier, static mandala.
 
