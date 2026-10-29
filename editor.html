@@ -429,7 +429,9 @@ function waterTorque(cx, cy, R) {
     for (const i of s.impacts) {
       if (i >= s.nd) break;
       const dx = s.xs[i] - cx, dy = s.ys[i] - cy;
-      if (dx * dx + dy * dy <= R * R) tq += dx * s.width[i] * fallSpeed(s.run[i]) / 25;
+      if (dx * dx + dy * dy > R * R) continue;
+      const J = s.jhit; // a jet strikes along its flight, not straight down
+      tq += J && J.i === i ? (dx * J.vy - dy * J.vx) * s.width[i] / 25 * .6 : dx * s.width[i] * fallSpeed(s.run[i]) / 25;
     }
   }
   return tq;
@@ -910,6 +912,100 @@ kind('chain', {
   },
 });
 
+// water gun: a gold-banded stone nozzle bracketed to a wall. Its jet flies a real arc and carries on as
+// ordinary water wherever it lands, so it can knock the diamonds round and fill the bowls.
+// aim is degrees above the horizontal; sweep swings it up and down; burst > 0 fires it on and off.
+const GOLD_LT = hex('#fff2b8'), GOLD_DK = hex('#b8862e'), GUN_LEN = 16;
+const gunShape = (u, v) => {
+  if (u < -7 || u > GUN_LEN + .5) return null;
+  const hw = u < 0 ? 4.5 : 3.5 - u / GUN_LEN, av = Math.abs(v); // a broad breech tapering to the muzzle
+  if (av > hw + .5) return null;
+  if (av > hw - .5 || u < -6.5) return C.ink;
+  if (u > GUN_LEN - 2 || (u > -1.5 && u < .5) || (u > 8 && u < 9.5)) return v < -1 ? GOLD_LT : C.gold; // muzzle ring and bands
+  return v < -hw + 1.5 ? C.stoneTop : mod(Math.round(u), 5) === 0 ? C.stone2 : C.stone1;
+};
+kind('gun', {
+  label: 'Water gun', color: C.gold, hint: 'A nozzle that shoots a jet in a real arc. The water carries on wherever it lands, so it can turn the machines.',
+  defaults: { s: -1, aim: 35, sp: 265, w: 3, sweep: 0, swsp: 2.4, burst: 0 },
+  fields: [opt('s', 'shoots', [[-1, 'right'], [1, 'left']]), num('aim', 'aim °', -40, 85), num('sp', 'power', 80, 450, 5), num('w', 'thickness', 1, 5),
+    num('sweep', 'sweep °', 0, 40), num('swsp', 'sweep speed', .2, 5, .1), num('burst', 'bursts (s)', 0, 3, .1)],
+  bounds: p => [14, 11, 2, -p.s * 4],
+  mirror: p => ({ ...p, x: MX(p.x), s: -p.s }),
+  create(p) {
+    const ang = () => { const up = (p.aim + p.sweep * Math.sin(simT * p.swsp)) * Math.PI / 180; return p.s < 0 ? -up : Math.PI + up; };
+    return {
+      sources() {
+        if (p.burst > 0 && mod(simT, p.burst) > p.burst * .6) return [];
+        const a = ang(), [mx, my] = toScreen(p.x, p.y, a, GUN_LEN + 2, 0);
+        return [[mx, my, p.w, Math.sign(Math.cos(a)), null, [p.sp * Math.cos(a), p.sp * Math.sin(a)]]];
+      },
+      front() {
+        raster(p.x + p.s * 4, p.y + 6, 0, 8, stoneRect(4, 6)); // the bracket
+        raster(p.x, p.y, ang(), GUN_LEN + 8, gunShape);
+      },
+    };
+  },
+});
+// fountain: a stone basin with a gold nozzle that throws a column of water up in front of everything,
+// with a fan of jets swaying round it and crown bursts off the top. Put it in the lake and it stands in it.
+// (the spray is purely visual, like the splashes; the basin itself is solid)
+const basinShape = (u, v) => {
+  const au = Math.abs(u);
+  if (v < -10 || v > 40) return null;
+  if (v < -6.5) return au < 2 - (v + 10) * .2 ? (au < 1 ? GOLD_LT : C.gold) : null;
+  if (v < -4) return au > 24.5 ? null : v < -5.5 ? GOLD_LT : v < -4.5 ? C.gold : GOLD_DK;
+  if (v < 5) { const hw = 23 - (v + 4) * 1.7; return au > hw + .5 ? null : au > hw - .8 ? C.ink : v < -3 ? C.stoneTop : mod(Math.round(u), 6) === 0 ? C.stone2 : C.stone1; }
+  if (v < 8) return au > 7.5 ? null : v < 6 ? C.gold : GOLD_DK;
+  if (au > 5.5) return null;
+  return au > 4.6 ? C.ink : Math.round(u + 5) % 3 === 0 ? C.stone0 : C.stone1;
+};
+kind('fountain', {
+  label: 'Fountain', color: WATER[5], hint: 'A basin that throws a column of water up in front of everything, with a fan of jets and crown bursts.',
+  defaults: { h: 150, fan: .5, pulse: 0, burst: 1 },
+  fields: [num('h', 'height', 10, 400, 5), num('fan', 'fan', 0, 1, .05), num('pulse', 'pulse (s)', 0, 8, .5), opt('burst', 'crown bursts', [[0, 'off'], [1, 'on']])],
+  bounds: p => [25, 25, 15],
+  create(p) {
+    const F = { h: 0, ph: 0 };
+    return {
+      front() { const d = drawOn; drawOn = false; raster(p.x, p.y, 0, 42, basinShape); drawOn = d; }, // solid, but drawn in front (see the fountain layer)
+      step() {
+        const g = G_ACC * .7, ny = p.y - 10, floor = ny + 5, period = p.pulse || 3, ph = mod(simT / period, 1);
+        const target = p.pulse > 0 && ph > .6 ? p.h * .2 : p.h;
+        F.h += (target - F.h) * (target > F.h ? .04 : .08);
+        if (F.h > 3) { // the column, its water thrown up and falling back round it
+          const v0 = Math.sqrt(2 * g * F.h);
+          for (let k = 3 + F.h / 14; k > 0; k--) if (Math.random() < k)
+            drop(p.x + (Math.random() - .5) * 3, ny, (Math.random() - .5) * (8 + F.h * .08), -v0 * (.9 + Math.random() * .1), 2 * v0 / g + .3, Math.random() < .3, floor);
+        }
+        if (p.fan > .05) for (const j of [-2, -1, 1, 2]) { // the fan: four jets swaying open and shut round the column
+          const a = j * (.22 + .1 * Math.sin(simT * 3.1)), v0 = 215 * p.fan;
+          for (let k = 0; k < 3; k++) drop(p.x + j, ny, Math.sin(a) * v0 + (Math.random() - .5) * 6, -Math.cos(a) * v0 * (.95 + Math.random() * .05), 2 * v0 / g + .5, Math.random() < .3, floor);
+        }
+        if (p.burst && F.ph < .5 && ph >= .5 && F.h > 20) { // crown burst off the top of the column
+          const top = ny - F.h * .85;
+          for (let k = 0; k < 90; k++) {
+            const a = -Math.PI / 2 + (Math.random() - .5) * 2.6, v = 120 + Math.random() * 150;
+            drop(p.x, top, Math.cos(a) * v, Math.sin(a) * v, 3.5, 1, floor);
+          }
+        }
+        F.ph = ph;
+      },
+      over(t) {
+        const ny = p.y - 10, pat = PATS[3];
+        if (F.h > 3) { // the solid core of the column; the drops make the rest
+          const top = F.h * .8;
+          for (let k = 0; k < top; k++) {
+            const hw = k < top * .7 ? 1 : 0, c = k > top - 3 ? C.foam : WATER[pat[mod(k - Math.floor(t * 260), 64)]];
+            for (let o = -hw; o <= hw; o++) mix(p.x + o, ny - k, o ? WATER[4] : c, o ? .6 : .9);
+          }
+        }
+        raster(p.x, p.y, 0, 42, basinShape, 1, false);
+        if (F.h > 3) for (let x = -20; x <= 20; x++) mix(p.x + x, p.y - 4, h2(x, Math.floor(t * 8)) < .3 ? C.foam : WATER[4], .9); // water brimming in the bowl
+      },
+    };
+  },
+});
+
 // the original temple
 const DEFAULT_SCENE = [
   { type: 'diamond', x: CX, y: 150, r: 50, face: 'circuit', seed: 0, I: 14000, bal: .3, fric: .5 },
@@ -1027,11 +1123,31 @@ function overflow(x, y, dir) {
     for (const d of [dir, -dir]) if (!blockedW(x + d, y - h)) return [x + d, y - h, d];
   return null;
 }
-function trace(x, y, w, dir, seed, from = null) {
+function trace(x, y, w, dir, seed, from = null, jet = null) {
   const id = streams.length;
   const s = { id, seed, xs: [], ys: [], kind: [], dir: [], tau: [], width: [], run: [], impacts: [], end: 'stuck', merge: null, nd: 0, parent: from && from.slice(0, 2) };
   streams.push(s);
   let tau = from ? from[2] : 0, run = 0, falling = !from, moved = !!from, revisits = 0;
+  if (jet) { // shot from a nozzle: fly the arc (kind 2, passing through other water) until it hits something, then pour on from there
+    let [vx, vy] = jet, px = x, py = y;
+    dir = Math.sign(vx) || dir; moved = true;
+    for (let n = 0; n < 4000; n++) {
+      const st = .7 / Math.max(Math.abs(vx), Math.abs(vy), 1);
+      px += vx * st; vy += G_ACC * st; py += vy * st;
+      const nx = Math.round(px), ny = Math.round(py);
+      if (nx === x && ny === y) continue;
+      if (nx < 0 || nx >= W) { s.end = 'off'; return s; }
+      if (ny >= POOL) { s.end = 'pool'; return s; }
+      const sp = Math.hypot(vx, vy);
+      run = clamp((sp - 40) / 9, 0, 32);
+      if (blockedW(nx, ny)) { s.jhit = { i: s.xs.length, vx, vy }; break; }
+      s.xs.push(nx); s.ys.push(ny); s.tau.push(tau); s.width.push(w); s.run.push(run); s.kind.push(2); s.dir.push(dir);
+      tau += SPEED / sp * Math.hypot(nx - x, ny - y);
+      x = nx; y = ny;
+    }
+    if (s.xs.length) for (const a of [s.xs, s.ys, s.tau, s.width, s.run, s.kind, s.dir]) a.pop(); // poured on from the last pixel in flight
+    if (s.jhit) s.jhit.i = s.xs.length;
+  }
   for (let step = 0; step < 1500; step++) {
     if (y >= POOL) { s.end = 'pool'; break; }
     if (y >= 0) {
@@ -1124,9 +1240,9 @@ function traceAll() {
   // the springs first, then everything else that pours (curtain lips)
   let n = 0;
   for (const springs of [true, false]) for (const e of parts) if (e.inst.sources && (e.type === 'spring') === springs)
-    for (const [x, y, w, d, pulse] of e.inst.sources()) {
+    for (const [x, y, w, d, pulse, jet] of e.inst.sources()) {
       if (x < 0 || x >= W) continue;
-      trace(Math.round(x), Math.round(y), pulse ? Math.max(1, Math.round(pulse(simT))) : w, d, n++ % PATS.length);
+      trace(Math.round(x), Math.round(y), pulse ? Math.max(1, Math.round(pulse(simT))) : w, d, n++ % PATS.length, null, jet);
     }
   vessels.forEach((V, j) => V.spill.forEach((sp, k) => trace(sp.x, sp.y, sp.w, sp.dir, (n + j * 2 + k) % PATS.length)));
   for (let q = 0; q < splits.length; q++) trace(...splits[q]);
@@ -1204,12 +1320,13 @@ function settleFronts() {
 }
 
 // particles on top: spray, shed droplets, ripples (purely visual)
-const SPRAYN = 2000;
+const SPRAYN = 6000;
 const sx = new Float32Array(SPRAYN), sy = new Float32Array(SPRAYN), svx = new Float32Array(SPRAYN), svy = new Float32Array(SPRAYN), slife = new Float32Array(SPRAYN), sbig = new Uint8Array(SPRAYN);
+const sfloor = new Float32Array(SPRAYN); // where each drop is gone: the lake, or a fountain's basin
 let sprayHead = 0;
-function drop(x, y, vx, vy, life, big = 0) {
+function drop(x, y, vx, vy, life, big = 0, floor = POOL) {
   const j = sprayHead; sprayHead = (sprayHead + 1) % SPRAYN;
-  sx[j] = x; sy[j] = y; svx[j] = vx; svy[j] = vy; slife[j] = life; sbig[j] = big;
+  sx[j] = x; sy[j] = y; svx[j] = vx; svy[j] = vy; slife[j] = life; sbig[j] = big; sfloor[j] = floor;
 }
 const ripples = [];
 const fallSpeed = run => Math.min(330, 40 + run * 9);
@@ -1236,10 +1353,13 @@ function emit() {
       if (s.nd && s.kind[i] === 0 && s.run[i] > 6) {
         const w = s.width[i], side = Math.random() < .5 ? -1 : 1;
         drop(s.xs[i] + side * (w >> 1) + side, s.ys[i], side * (8 + Math.random() * 20), fallSpeed(s.run[i]) * .8, .4 + Math.random() * .5);
+      } else if (s.nd && s.kind[i] === 2) { // mist trailing off a jet, flying on the way it was going
+        const j = Math.min(i + 1, s.nd - 1);
+        drop(s.xs[i], s.ys[i], (s.xs[j] - s.xs[i]) * 140 + (Math.random() - .5) * 40, (s.ys[j] - s.ys[i]) * 140 + (Math.random() - .5) * 40, .25 + Math.random() * .35);
       }
     }
   }
-  for (let j = 0; j < SPRAYN; j++) if (slife[j] > 0) { svy[j] += G_ACC * .7 * DT; sx[j] += svx[j] * DT; sy[j] += svy[j] * DT; slife[j] -= DT; if (sy[j] >= POOL) slife[j] = 0; }
+  for (let j = 0; j < SPRAYN; j++) if (slife[j] > 0) { svy[j] += G_ACC * .7 * DT; sx[j] += svx[j] * DT; sy[j] += svy[j] * DT; slife[j] -= DT; if (sy[j] >= sfloor[j] && svy[j] > 0) slife[j] = 0; }
   for (let k = ripples.length - 1; k >= 0; k--) if ((ripples[k].age += DT) > 1.2) ripples.splice(k, 1);
 }
 function simStep() { vesselWater(); traceAll(); stepMachines(); handFx(); emit(); }
@@ -1274,6 +1394,10 @@ function drawStream(s, t, i0, i1, ghost) {
         const o = px - x0, c = lip ? C.foam : neon(WATER[pat[mod(Math.floor(v * .8) + off[o], 64)]], v, s.seed, t);
         mix(px, y, c, (px === lo || px === hi) && hi - lo > 1 ? .6 : .94);
       }
+    } else if (s.kind[i] === 2) {
+      // a jet in flight: a round slug of water, brighter on top
+      const r = w >> 1, c = neon(WATER[pat[mod(Math.floor(v * .8), 64)]], v, s.seed, t);
+      for (let oy = -r; oy <= r; oy++) for (let ox = -r; ox <= r; ox++) if (ox * ox + oy * oy <= r * r) mix(x + ox, y + oy, oy < 0 ? WATER[5] : c, .92);
     } else {
       // running water: a sheet riding on top of a ledge, or hugging the outside of a slope
       const slope = i > 0 && s.ys[i - 1] !== y, d = s.dir[i] || 1;
@@ -1485,6 +1609,8 @@ function outline(e, c, a, t) {
   for (let y = y0; y <= y1; y++) { dot(x1, y, y); dot(x0, y, -y); }
   if (a === 1) for (let k = -2; k <= 2; k++) { dot(e.p.x + k, e.p.y, ph, .8); dot(e.p.x, e.p.y + k, ph, .8); }
 }
+// fountains stand in front of everything, the lake included
+layer('fountain', { draw(t) { for (const { inst } of parts) inst.over?.(t); } });
 layer('editor', { post(t) {
   if (!ED.on) return;
   const sel = selected(), hov = parts.find(e => e.id === ED.hover);

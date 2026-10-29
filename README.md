@@ -8,7 +8,7 @@ space pauses.
 **Live:** https://zscore.github.io/pixel-mandala/cascade.html · **Editor:** https://zscore.github.io/pixel-mandala/editor.html
 
 `editor.html` is an editable version: the panel on the right adds parts
-(springs, ledges, diamonds, wheels, sōzu, …) and edits the selected one; drag
+(springs, ledges, diamonds, wheels, sōzu, water guns, fountains, …) and edits the selected one; drag
 parts around the scene and the water re-routes live. Scenes save in the browser
 and can be downloaded and reopened as .json files. `?fresh` starts from the
 original temple.
