@@ -1,0 +1,1721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#dff4ff">
+<title>Marble Cascade</title>
+<style>
+  :root { --bg: #dff4ff; }
+  html, body { margin: 0; height: 100%; background: var(--bg); }
+  body {
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  canvas {
+    height: min(96vh, calc(96vw * 16 / 9));
+    height: min(96dvh, calc(96vw * 16 / 9));
+    aspect-ratio: 9 / 16;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    box-shadow: 0 0 60px rgba(80, 180, 255, .35);
+    cursor: none;
+    touch-action: none;
+  }
+  /* phones: fill the screen edge to edge; the letterbox is the same color as the scene's background */
+  @media (max-width: 600px), (pointer: coarse) {
+    canvas { height: min(100vh, calc(100vw * 16 / 9)); height: min(100dvh, calc(100vw * 16 / 9)); box-shadow: none; }
+  }
+</style>
+</head>
+<body>
+<canvas id="c" title="drag a part to turn it · space to pause"></canvas>
+<script>
+const W = 360, H = 1280, CX = 180, N = W * H * 4;
+const VIEW = 640;      // the canvas is a 9:16 window onto the 9:32 cathedral front, panned up and down by the show
+const POOL = 1236;     // water surface of the lake
+const FY = POOL - 594; // the fountain's parts are laid out from the lake up
+const FULL = new URLSearchParams(location.search).get('view') === 'full'; // ?view=full shows the whole front at once
+let vy0 = 0, vy1 = H;  // the rows in view this frame
+const canvas = document.getElementById('c');
+canvas.width = W; canvas.height = FULL ? H : VIEW;
+if (FULL) canvas.style.aspectRatio = '9 / 32';
+const ctx = canvas.getContext('2d');
+const img = ctx.createImageData(W, H);
+const O = img.data; // composited output
+let T = null;       // layer buffer currently being drawn into
+let drawOn = true;  // false on simulation steps that won't be shown: shapes only write the collision mask
+
+// ---------- utils ----------
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const lerp = (a, b, k) => a + (b - a) * k;
+const lerpC = (a, b, k) => [lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k)];
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const mod = (a, n) => ((a % n) + n) % n;
+const MX = x => 2 * CX - x; // mirror across the center column
+
+function h2(x, y) {
+  let n = (Math.imul(x, 374761393) + Math.imul(y, 668265263)) | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = h2(xi, yi), b = h2(xi + 1, yi), c = h2(xi, yi + 1), d = h2(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+const fbm = (x, y) => vnoise(x, y) * .5 + vnoise(x * 2.1, y * 2.1) * .3 + vnoise(x * 4.3, y * 4.3) * .2;
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => v / 16 - .5);
+
+// "over" blend into the current layer buffer (straight alpha)
+function mix(x, y, c, a = 1) {
+  x |= 0; y |= 0;
+  if (x < 0 || y < 0 || x >= W || y >= H || a <= 0) return;
+  const i = (y * W + x) << 2, oa = T[i + 3] / 255;
+  if (a >= 1 || oa === 0) { T[i] = c[0]; T[i + 1] = c[1]; T[i + 2] = c[2]; T[i + 3] = (a > 1 ? 1 : a) * 255; return; }
+  const na = a + oa * (1 - a), k = a / na;
+  T[i] += (c[0] - T[i]) * k; T[i + 1] += (c[1] - T[i + 1]) * k; T[i + 2] += (c[2] - T[i + 2]) * k; T[i + 3] = na * 255;
+}
+const put = (x, y, c) => mix(x, y, c, 1);
+function line(x0, y0, x1, y1, c, a) {
+  x0 = Math.round(x0); y0 = Math.round(y0); x1 = Math.round(x1); y1 = Math.round(y1);
+  const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1, dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (let n = 0; n < 2000; n++) {
+    mix(x0, y0, c, a);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+
+// ---------- palette ----------
+// heaven in white marble: cyan-shaded stone, gold trim, vivid blue water
+const C = {
+  ink: hex('#1f4a66'), inkRim: hex('#6fb4cc'), shine: hex('#ffffff'), gold: hex('#ffd23f'),
+  goldDk: hex('#c8901a'), goldLt: hex('#fff3a8'), deep: hex('#2a6a88'), white: hex('#ffffff'), mist: hex('#ffffff'),
+  stone0: hex('#bfe6ee'), stone1: hex('#f2fcfd'), stone2: hex('#d8f2f6'), stoneTop: hex('#ffffff'),
+  foam: hex('#e8fcff'), facet0: hex('#cdeef4'), facet1: hex('#f4fdfe'), cloud: hex('#f4fbff'), cloudSh: hex('#cfe8f8'),
+  evil: hex('#ff3d8b'),
+};
+const WATER = ['#0a5fd0', '#1384ec', '#1fa6f8', '#3cc4ff', '#7fdcff', '#c2f2ff', '#f0fdff'].map(hex);
+const RAIN = ['#ffd23f', '#7fdcff', '#fff3a8', '#3cc4ff'].map(hex); // motes of gold and blue drifting up
+const NEON = ['#ffffff', '#bff4ff', '#fff3a8', '#e0fbff'].map(hex); // sunlit glints in the streams
+const GILT = ['#a8781e', '#e0b040', '#fff1b8', '#c8962e'].map(hex);
+const GEM_TOP = ['#f0fff6', '#b8f5d0', '#6fe0a0', '#2fb878', '#a0f0d8'].map(hex);
+const GEM_SIDE = ['#e8fffc', '#a8f0ec', '#5fd6d6', '#2a9fb0', '#7fe8c8'].map(hex);
+const GEM_LIP = ['#fff6d8', '#ffe08a', '#f0c040', '#7fe8c0', '#3fb890'].map(hex);
+// marble: one 256² tile of veined stone, read in each shape's own coordinates so the veins turn with it
+const MARB = ['#ffffff', '#e8f8fb', '#c4ecf2', '#94d4e2', '#ffffff'].map(hex);
+const marbTex = new Uint8Array(256 * 256);
+for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
+  const k = Math.abs(Math.sin((fbm(x * .035, y * .035) * 5 + x * .012 + y * .02) * Math.PI));
+  marbTex[y * 256 + x] = k < .05 ? 3 : k < .14 ? 2 : vnoise(x * .2, y * .2) < .3 ? 1 : h2(x, y) < .02 ? 4 : 0;
+}
+const marble = (u, v, seed = 0) => MARB[marbTex[((Math.round(v) + 128 + seed * 7) & 255) * 256 + ((Math.round(u) + 128 + seed * 11) & 255)]];
+// a band of gold light sweeping across all the stone (SHOW.glint is its position, or < 0 when there's none)
+const glint = (x, y, c) => { const d = Math.abs(x + y * .6 - SHOW.glint); return d < 5 ? lerpC(c, C.goldLt, .75 * (1 - d / 5)) : c; };
+
+// ============================================================
+// SHAPES — every piece of the temple is a shape in its own local
+// coordinates, rasterized each frame with a rotation and a "phase"
+// (1 = solid, 0 = gone, in between = ordered-dither dissolve).
+// Solid shapes also write the collision mask the water reads.
+// ============================================================
+const mask = new Uint8Array(W * H);
+function raster(x0, y0, ang, R, col, phase = 1, isSolid = true) {
+  if (phase <= 0) return;
+  const ca = Math.cos(ang), sa = Math.sin(ang);
+  const xa = Math.max(0, Math.floor(x0 - R)), xb = Math.min(W - 1, Math.ceil(x0 + R));
+  const ya = Math.max(0, Math.floor(y0 - R)), yb = Math.min(H - 1, Math.ceil(y0 + R));
+  for (let y = ya; y <= yb; y++) for (let x = xa; x <= xb; x++) {
+    if (phase < 1 && phase <= BAYER[(y & 3) * 4 + (x & 3)] + .5) continue;
+    const dx = x - x0, dy = y - y0, c = col(dx * ca + dy * sa, -dx * sa + dy * ca);
+    if (!c) continue;
+    if (isSolid) mask[y * W + x] = 1;
+    if (drawOn && y >= vy0 && y < vy1) put(x, y, SHOW.glint >= 0 ? glint(x, y, c) : c);
+  }
+}
+// parts that never move are worked out once, then copied into the mask (and the layer, where in view) each step
+const stills = new Map();
+function still(key, x0, y0, R, col, isSolid = true) {
+  let S = stills.get(key);
+  if (!S) {
+    S = { px: [], cs: [] };
+    const xa = Math.max(0, Math.floor(x0 - R)), xb = Math.min(W - 1, Math.ceil(x0 + R)), ya = Math.max(0, Math.floor(y0 - R)), yb = Math.min(H - 1, Math.ceil(y0 + R));
+    for (let y = ya; y <= yb; y++) for (let x = xa; x <= xb; x++) { const c = col(x - x0, y - y0); if (c) { S.px.push(y * W + x); S.cs.push(c); } }
+    stills.set(key, S);
+  }
+  const { px, cs } = S, g = SHOW.glint >= 0;
+  for (let k = 0; k < px.length; k++) {
+    const i = px[k], y = (i / W) | 0;
+    if (isSolid) mask[i] = 1;
+    if (drawOn && y >= vy0 && y < vy1) { const x = i % W; put(x, y, g ? glint(x, y, cs[k]) : cs[k]); }
+  }
+}
+const toScreen = (x0, y0, ang, u, v) => [x0 + u * Math.cos(ang) - v * Math.sin(ang), y0 + u * Math.sin(ang) + v * Math.cos(ang)];
+// 1 while present → dissolves out → stays gone → dissolves back in
+function cycle(t, period, offset, gone = .25, fade = .12) {
+  const u = mod(t / period + offset, 1), on = 1 - gone - 2 * fade;
+  if (u < on) return 1;
+  if (u < on + fade) return 1 - (u - on) / fade;
+  if (u < on + fade + gone) return 0;
+  return (u - on - fade - gone) / fade;
+}
+const edgeD = (u, v, r) => r + .35 - Math.abs(u) - Math.abs(v); // distance inside a diamond's edge
+
+// a marble slab with a gold band under its face
+const stoneRect = (hw, hh, seed = 0) => (u, v) => {
+  if (Math.abs(u) > hw + .5 || Math.abs(v) > hh + .5) return null;
+  const x = Math.round(u + hw), y = Math.round(v + hh);
+  return y <= 0 ? C.stoneTop : y >= 2 * hh ? C.ink : (x <= 0 || x >= 2 * hw) ? C.ink : y === 2 * hh - 1 ? C.gold : marble(u, v, seed);
+};
+const gemShape = (r, pal, t) => {
+  const sheen = Math.floor(t * 40), inner = (r - 5) * .75, spin = Math.floor(t * 4);
+  return (u, v) => {
+    const e = edgeD(u, v, r);
+    if (e < 0) return null;
+    const ei = Math.floor(e), m = Math.round(Math.max(Math.abs(u), Math.abs(v)));
+    if (ei < 1) return C.ink;
+    if (ei < 4) return mod(Math.round(u - v) + sheen, 80) < 5 ? C.white : GILT[ei - 1];
+    if (ei < 5) return C.deep;
+    if (m <= inner) return m === Math.floor(inner) ? C.deep : m < 2 ? C.white : pal[mod((m >> 1) - spin, pal.length)];
+    return Math.round(Math.abs(u) + Math.abs(v)) & 1 ? C.facet0 : C.facet1;
+  };
+};
+// a cup: floor plus two walls, pivoting about its middle
+const cupShape = (hw, depth) => (u, v) => {
+  const au = Math.abs(u);
+  if (au > hw + .5) return null;
+  if (v >= 0 && v <= 5.5) return v < 1 ? C.stoneTop : v > 4.5 ? C.ink : (Math.round(u) + 2) % 8 < 2 ? C.stone0 : C.stone1;
+  if (v < 0 && v >= -depth && au >= hw - 3.5) return (au >= hw - .5 || v < -depth + 1) ? C.stoneTop : C.stone2;
+  return null;
+};
+
+// rose windows: wheels of stained glass in marble tracery and a gold frame, turned by the water. The small ones'
+// colors step round the wheel as time goes on (cycle); the big one keeps its own.
+const D1 = { x: CX, y: 400, r: 60 };
+const GLASS = ['#3cc4ff', '#ff6fb4', '#ffd23f', '#1f7ae8', '#a77bff', '#7fe8ff'].map(hex);
+const roseWindow = (t, r = D1.r, seed = 0, cycle = true) => {
+  const wave = mod(t * 40 + seed * 17, r + 30), shift = (cycle ? Math.floor(t * .7) : 0) + seed, lit = SHOW.glass;
+  const mold = Math.max(2, r * .07), ring = r * .43, foil = r * .67, fr = r * .15, hub = Math.max(3, r * .12);
+  return (u, v) => {
+    const d = Math.hypot(u, v);
+    if (d > r + .5) return null;
+    if (d > r - 1) return C.ink;
+    if (d > r - 3) return C.gold;
+    if (d > r - 3 - mold) return mod(Math.atan2(v, u) * 36 / Math.PI, 2) < 1 ? C.white : MARB[2]; // beaded marble molding
+    if (d > r - 4.5 - mold) return C.ink;
+    if (d < hub) return d > hub - 1 ? C.ink : d < hub * .45 ? C.goldLt : C.gold;                       // gold hub
+    const f = mod(Math.atan2(v, u) * 6 / Math.PI, 12), k = Math.floor(f), sp = d * Math.sin(Math.min(f - k, k + 1 - f) * Math.PI / 6);
+    const fa = (k + .5) * Math.PI / 6, fd = Math.hypot(u - Math.cos(fa) * foil, v - Math.sin(fa) * foil); // a round foil in each light
+    if (sp < 1.2 || Math.abs(d - ring) < 1.3 || Math.abs(fd - fr) < 1.1) return C.white;                  // tracery
+    if (sp < 1.9 || Math.abs(d - ring) < 2 || Math.abs(fd - fr) < 1.8) return C.ink;
+    let c = GLASS[mod(k + (d > ring ? 3 : 0) + (fd < fr ? 2 : 0) + shift, GLASS.length)];
+    if (Math.abs(d - wave) < 3) c = lerpC(c, C.white, .55);
+    return lit > 0 ? lerpC(c, C.white, lit * (.25 + .2 * Math.sin(t * 6 + k))) : c;
+  };
+};
+
+// ---------- small sprites ----------
+const BEAD = ['.XXX.', 'XHXXX', 'XXXXX', 'XXXXr', '.XrX.'];
+let beadIdx = 0;
+function bead(x, y, t) {
+  x = Math.round(x); y = Math.round(y);
+  const i = beadIdx++, glint = mod(i * .29 - t * 1.4, 7) < .35;
+  for (let r = 0; r < 5; r++) for (let q = 0; q < 5; q++) {
+    const ch = BEAD[r][q];
+    if (ch !== '.') put(x + q - 2, y + r - 2, ch === 'X' ? C.stone1 : ch === 'r' ? C.stone0 : glint ? C.gold : C.white); // pearls
+  }
+}
+function beadPath(pts, t, spacing = 4) {
+  for (let s = 0; s < pts.length - 1; s++) {
+    const [x0, y0] = pts[s], [x1, y1] = pts[s + 1];
+    const n = Math.max(1, Math.round(Math.hypot(x1 - x0, y1 - y0) / spacing));
+    for (let k = 0; k < n; k++) bead(lerp(x0, x1, k / n), lerp(y0, y1, k / n), t);
+  }
+}
+const boss = (u, v) => { const r = Math.hypot(u, v); return r > 3.5 ? null : r > 2.6 ? C.goldDk : r < 1.2 ? C.goldLt : C.gold; }; // a gold stud on an axle
+// ============================================================
+// LAYERS (back → front)
+//   update(t): runs every frame even when hidden (physics, collision mask)
+//   draw(t):   only when visible
+//   post(t):   operates on the composite so far
+// ============================================================
+const layers = [];
+function layer(name, opts) {
+  const L = { name, on: true, buf: opts.post ? null : new Uint8ClampedArray(N), ...opts };
+  if (L.static) { T = L.buf; L.draw(0); }
+  layers.push(L); return L;
+}
+
+// ---- the cathedral front, painted once behind everything ----------------
+// Glassy sky and clouds over twin towers with spires and a gable, the rose's recess, a gallery of arches
+// and the great portal, all white marble in soft cyan shade with gold string courses and window frames.
+// It's only a backdrop: what the water lands on is drawn in the temple layer in front of it.
+const SKY = ['#1556d8', '#1e6ae6', '#2a80f0', '#3c98f6', '#56b0fa', '#78c8fc', '#9edcfe', '#c6ecff', '#e8f8ff'].map(hex);
+const FAC = { wall: hex('#f4fcfe'), joint: hex('#dcf1f7'), shade: hex('#c4e8f2'), deep: hex('#8fd2e6'), dark: hex('#4aa6c8'), glass: hex('#6fc8ea'), trim: hex('#ffe08a') };
+const TOWER = 84; // the towers stand this wide at each side
+// inside a pointed (equilateral) arch hw wide, springing from y = spring
+const inArch = (x, y, cx, hw, spring) => y >= spring ? Math.abs(x - cx) <= hw : Math.hypot(x - cx + hw, y - spring) <= 2 * hw && Math.hypot(x - cx - hw, y - spring) <= 2 * hw;
+function lancet(x, y, cx, hw, top, bot) { // a gold-framed lancet window: its color at (x, y), or null outside it
+  const spring = top + hw * 1.73;
+  if (y > bot || y < top || !inArch(x, y, cx, hw, spring)) return null;
+  if (!inArch(x, y, cx, hw - 2, spring + 1) || y > bot - 2) return FAC.trim;
+  return x === cx ? FAC.wall : y < spring + 6 ? FAC.glass : lerpC(FAC.glass, FAC.dark, Math.min(.6, (y - spring) / (bot - spring)));
+}
+function facade(x, y) { // the color of the front at (x, y), or null where the sky shows
+  const ax = Math.min(x, W - 1 - x), dc = Math.abs(x - CX), tower = ax < TOWER, gable = 210 + dc * .83;
+  if (tower && y < 170) { // a spire and its corner pinnacles
+    const sp = Math.abs(ax - 42) < 34 * (y - 30) / 140, pin = y > 118 && (Math.abs(ax - 6) < 4 * (y - 118) / 52 || Math.abs(ax - 78) < 4 * (y - 118) / 52);
+    if (!sp && !pin) return null;
+    if (sp && Math.abs(ax - 42) < 2 && y > 80 && y < 140) return FAC.deep;
+    return (x < CX) === (ax > 42) ? FAC.shade : y % 10 === 0 ? FAC.joint : FAC.wall; // shaded on the side away from the light
+  }
+  if (!tower && y < gable) return y > 50 && dc < 6 * (y - 50) / 160 ? (x > CX ? FAC.shade : FAC.wall) : null; // sky, but for a slim flèche
+  for (const sy of [170, 300, 545, 735, 860]) if (y >= sy && y < sy + 3) return y === sy ? FAC.trim : y === sy + 1 ? FAC.wall : FAC.shade; // string courses
+  if (!tower && y < 300 && y < gable + 3) return FAC.trim;                     // the gable's gilded edge
+  if (!tower && y < 296 && y > gable + 22) return FAC.shade;                   // its tympanum
+  let w;
+  if (tower) {
+    for (const [cx, hw, top, bot] of [[42, 18, 300, 440], [30, 8, 478, 540], [54, 8, 478, 540], [42, 16, 600, 730], [42, 16, 880, 1010]])
+      if ((w = lancet(ax, y, cx, hw, top, bot))) return w;
+    if (y > 466 && y < 540 && inArch(ax, y, 42, 22, 504)) { const r = Math.hypot(ax - 42, y - 487); return r < 6 ? (r > 4.5 ? FAC.trim : FAC.glass) : FAC.shade; } // a roundel over the twin lancets
+    if (inArch(ax, y, 42, 22, 1110)) return inArch(ax, y, 42, 18, 1114) ? lerpC(FAC.dark, FAC.deep, (y - 1080) / 160) : FAC.trim; // side portals
+  } else {
+    const d = Math.hypot(x - D1.x, y - D1.y);
+    if (d < 72) return d > 69 ? FAC.trim : FAC.deep;                            // the rose's recess
+    if (y > 560 && y < 722 && ax > 92) {                                        // a gallery of arches
+      const q = mod(x - 96, 24);
+      if (y > 574 && inArch(q, y, 12, 7.5, 594)) return y > 700 ? FAC.shade : FAC.deep;
+      if (q <= 4 || q >= 20) return y === 572 || y === 573 ? FAC.trim : FAC.wall;
+    }
+    if (inArch(x, y, CX, 74, 964)) {                                            // the great portal
+      if (!inArch(x, y, CX, 62, 966)) return [FAC.trim, FAC.wall, FAC.shade][[70, 66].filter(h => inArch(x, y, CX, h, 964)).length];
+      if (y < 1040) return mod(x + y, 9) < 1 ? FAC.wall : FAC.shade;           // carved tympanum
+      return dc < 1 || (mod(x - CX, 14) === 7 && mod(y, 14) === 7) ? FAC.trim : lerpC(FAC.dark, FAC.deep, (y - 1040) / 400); // studded doors
+    }
+  }
+  if (ax > 78 && ax < 92) return ax < 81 || ax > 89 ? FAC.shade : FAC.wall;  // buttresses
+  if (ax < 3) return FAC.shade;
+  return y % 12 === 0 || mod(x + (Math.floor(y / 12) & 1) * 11, 22) === 0 ? FAC.joint : FAC.wall; // coursed blocks
+}
+layer('cathedral', { static: true, draw() {
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let c = facade(x, y);
+    if (!c) {
+      const cl = fbm(x * .012 + 4, y * .03) + .15 * Math.sin(x * .02 + y * .01) - y * .0007; // big soft clouds
+      c = cl > .68 ? C.white : cl > .64 ? C.cloud : cl > .61 ? C.cloudSh : SKY[clamp(Math.round(y / 300 * 8 + BAYER[(y & 3) * 4 + (x & 3)] * 1.2), 0, 8)];
+    }
+    put(x, y, c);
+  }
+} });
+
+// ---- shimmer: sparkles twinkling over the front and slow bands of light drifting across it ----
+const SPARKS = Array.from({ length: 260 }, (_, k) => { const R = rng(900 + k); return { x: R() * W | 0, y: R() * POOL | 0, f: 1.2 + R() * 2.5, ph: R() * 9, c: R() < .5 ? C.gold : R() < .5 ? WATER[3] : C.white }; });
+const rays = new Float32Array(W + H);
+layer('shimmer', { draw(t) {
+  for (let d = 0; d < W + H; d++) rays[d] = .14 * Math.max(0, Math.sin(d * .018 - t * .45)) ** 6;
+  for (let y = vy0; y < Math.min(vy1, POOL); y++) for (let x = 0; x < W; x++) { const a = rays[(x >> 1) + y]; if (a > .01) mix(x, y, C.white, a); }
+  for (const s of SPARKS) {
+    if (s.y < vy0 || s.y >= vy1) continue;
+    const b = Math.sin(t * s.f + s.ph);
+    if (b < .55) continue;
+    const k = (b - .55) / .45, n = k > .75 ? 3 : k > .35 ? 2 : 1;
+    mix(s.x, s.y, s.c, k);
+    for (let r = 1; r <= n; r++) for (const [dx, dy] of [[r, 0], [-r, 0], [0, r], [0, -r]]) mix(s.x + dx, s.y + dy, s.c, k * (1 - r / (n + 1)));
+  }
+} });
+
+// ---- rising motes: faint gold and blue drifting up off the lake ----------
+const PL = 256;
+const rain = [];
+(function buildRain() {
+  const R = rng(3);
+  for (let x = 0; x < W; x++) {
+    const pat = new Uint8Array(PL), dens = x % 2 === 0 ? .22 : .1;
+    let p = 0;
+    while (p < PL) {
+      if (R() < dens) { const len = 1 + Math.floor(R() * 5), ci = 1 + Math.floor(R() * RAIN.length); for (let k = 0; k < len && p < PL; k++) pat[p++] = ci; p++; }
+      else p += 1 + Math.floor(R() * 3);
+    }
+    const top = 40 + Math.floor(fbm(x * .07, 5) * 160 + R() * 40); // where it has faded out entirely
+    const a = x % 2 === 0 ? .16 : .08, fade = new Float32Array(H); // strongest just above the lake, gone by the top
+    for (let y = top; y < POOL; y++) fade[y] = a * ((y - top) / (POOL - top)) ** .7 * Math.min(1, (POOL - y) / 12);
+    rain.push({ pat, top, fade, sp: 6 + R() * 18, ph: R() * PL });
+  }
+})();
+layer('rising rain', { draw(t) {
+  for (let x = 0; x < W; x++) {
+    const col = rain[x], off = Math.floor(t * col.sp + col.ph);
+    for (let y = Math.max(col.top, vy0); y < Math.min(POOL, vy1); y++) {
+      const ci = col.pat[(y + off) & (PL - 1)];
+      if (ci) mix(x, y, RAIN[ci - 1], col.fade[y]);
+    }
+  }
+} });
+
+// ---- temple: the moving, colliding architecture ----------------
+const S0 = { x: CX, y: 268, r: 16 };                        // crown spring, in the gable (fixed)
+const LIP = { x: CX, y: 503, hw: 22, hh: 3 };                // curtain lip, under a canopy (fixed)
+// a gilded gothic canopy: a little crocketed gable with a trefoil, over the lip the curtain pours from
+const canopy = (u, v) => {
+  const au = Math.abs(u), edge = 24 + v * 1.45;
+  if (v > 3.5 || v < -17.5 || au > 25.5) return null;
+  if (v >= -.5) return au > 24.5 ? null : v > 2.5 || au > 23.5 ? C.ink : v < .5 ? C.white : C.gold;
+  if (au <= edge) {
+    const foil = Math.min(Math.hypot(u, v + 8.6), Math.hypot(u - 2.6, v + 4.6), Math.hypot(u + 2.6, v + 4.6)); // a trefoil pierced in the gable
+    return au > edge - 1 ? C.ink : au > edge - 2.2 ? C.gold : foil < 1.6 ? MARB[3] : foil < 2.6 ? C.ink : MARB[1];
+  }
+  if (au <= edge + 2.5 && mod(au, 6) < 2.5 && v < -1.5) return C.white;                                      // crockets
+  return v < -15.5 && au < 1.5 ? C.gold : null;                                                              // finial
+};
+const SIDE = [-1, 1].map(s => {
+  const X = x => s < 0 ? x : MX(x);
+  return {
+    s,
+    spring: { x: X(42), y: 186, r: 11 },
+    d2: { x: X(42), y: 262, r: 22 },
+  };
+});
+const pose = {}; // current angles/phases, shared with the foreground layer
+
+// ---- bodies on axles: nothing turns them but the water ----------
+// Each has inertia, axle friction and a little ballast that pulls it back toward its rest angle;
+// water landing on it (and the weight and drag of water running over it) supplies the torque.
+function body(x, y, R, o) { return { x, y, R, a: 0, w: 0, I: 1, bal: 0, fric: .4, ...o }; }
+const BODY = {
+  d1: body(D1.x, D1.y, D1.r * 1.05 + 2, { I: 14000, bal: .3, fric: .5 }),
+  d2: SIDE.map(sd => body(sd.d2.x, sd.d2.y, sd.d2.r * 1.05 + 2, { I: 1400, bal: .4, fric: .7 })),
+};
+// torque about the axle (ax, ay) from the water within R of (cx, cy): the weight of water running over a
+// surface plus its drag along the way it's flowing, and the punch of falling water where it lands
+function waterTorque(cx, cy, R, ax = cx, ay = cy) {
+  let tq = 0;
+  for (const s of streams) {
+    for (let i = 0; i < s.nd; i++) {
+      if (s.kind[i] !== 1) continue;
+      let dx = s.xs[i] - cx, dy = s.ys[i] - cy;
+      if (dx * dx + dy * dy > R * R) continue;
+      dx = s.xs[i] - ax; dy = s.ys[i] - ay;
+      const j = Math.min(i + 1, s.nd - 1), fx = (s.xs[j] - s.xs[i]) * .6, fy = 1 + (s.ys[j] - s.ys[i]) * .6;
+      tq += s.width[i] * (dx * fy - dy * fx);
+    }
+    for (const i of s.impacts) {
+      if (i >= s.nd) break;
+      let dx = s.xs[i] - cx, dy = s.ys[i] - cy;
+      if (dx * dx + dy * dy > R * R) continue;
+      dx = s.xs[i] - ax; dy = s.ys[i] - ay;
+      const J = s.jhit; // a jet strikes along its flight, not straight down
+      tq += J && J.i === i ? (dx * J.vy - dy * J.vx) * s.width[i] / 25 * .6 : dx * s.width[i] * fallSpeed(s.run[i]) / 25;
+    }
+  }
+  return tq;
+}
+function spinBody(b, tq) {
+  b.w += (tq / b.I - b.bal * Math.sin(b.a) - b.fric * b.w) * DT;
+  b.a += b.w * DT;
+}
+function stepBodies() {
+  spinBody(BODY.d1, waterTorque(BODY.d1.x, BODY.d1.y, BODY.d1.R));
+  for (const b of BODY.d2) spinBody(b, waterTorque(b.x, b.y, b.R));
+  // the censer, a pendulum on its chain: whatever water strikes it shoves it, about the top of the chain
+  // (its angle runs the other way round from the bodies'), and someone up there keeps it gently swinging
+  const C0 = CENSER, [bx, by] = censerAt();
+  C0.w += (-waterTorque(bx, by, 13, C0.x, C0.y) / C0.I - C0.bal * Math.sin(C0.a) - C0.fric * C0.w + C0.pump * Math.sign(C0.w || 1)) * DT;
+  C0.a += C0.w * DT;
+}
+
+// ---- the fountain: the marble centerpiece below the temple ----------------
+// Vessels hold water by volume: it fills them from the bottom up at any tilt and
+// pours over whichever lip ends up below the surface (see fillVessel).
+const vessels = [];
+function vessel(o) {
+  const V = { x: 0, y: 0, ang: 0, vol: 0, cap: 1, surf: 0, pix: [], spill: [], qin: 10, qout: 24, ...o };
+  vessels.push(V); return V;
+}
+
+// sprite: a figure carved once from parts over u in [-hw, hw], v in [top, bot], listed back to front. A part is
+//   { in(u, v) → inside it, m: its ramp (light → dark), r: how far its surface domes up from its outline,
+//     bump(u, v): relief added to that (folds, feathers, ribs), mark(u, v): steps darker (a carved line; 9 = ink),
+//     dim: steps darker all over (set back), soft: no contour where it lies over the parts behind it }
+// Each pixel takes the frontmost part over it. That part's surface is domed up from its own whole outline, so a
+// limb stays round where it passes behind another, lit from the upper left and stepped down its ramp. A part in
+// front of another gets a contour in the darkest shade of its ramp, and the one behind darkens along the seam,
+// more where the front one shades it from the light. An outline is traced round the whole figure, lighter along
+// the lit side. Returns a shape for raster.
+const RAMP = {
+  marble: ['#ffffff', '#eafafc', '#c8eef5', '#98d6e6', '#64b4d0'].map(hex),
+  gold: ['#fff3a8', '#ffd23f', '#eab030', '#c8901a', '#8c5c12'].map(hex),
+  horn: ['#a8dcea', '#7cc2da', '#5aa6c4', '#3f86a8', '#2c6888'].map(hex),
+  cloud: ['#ffffff', '#f4fbff', '#e2f2fc', '#cae6f8', '#b0d8f2'].map(hex),
+};
+const LIGHT = [-.5, -.7, .75].map((c, _, l) => c / Math.hypot(...l));
+function sprite(hw, top, bot, parts, edge = C.ink, rim = hex('#4a90b0'), L = LIGHT) {
+  const w = 2 * hw + 3, h = bot - top + 3, n = w * h, S2 = Math.SQRT2; // a pixel of margin all round
+  const U = i => i % w - hw - 1, V = i => (i / w | 0) + top - 1, own = new Int16Array(n).fill(-1);
+  const Z = parts.map((p, k) => {
+    const d = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const u = U(i), v = V(i); if (u >= -hw && u <= hw && v >= top && v <= bot && p.in(u, v)) { d[i] = 1e9; own[i] = k; } }
+    for (let i = w + 1; i < n - w - 1; i++) if (d[i]) d[i] = Math.min(d[i], d[i - 1] + 1, d[i - w] + 1, d[i - w - 1] + S2, d[i - w + 1] + S2); // distance in from the outline
+    for (let i = n - w - 2; i > w; i--) if (d[i]) d[i] = Math.min(d[i], d[i + 1] + 1, d[i + w] + 1, d[i + w + 1] + S2, d[i + w - 1] + S2);
+    const r = p.r ?? 4;
+    for (let i = 0; i < n; i++) if (d[i]) { const k = Math.min(d[i] - .5, r) / r; d[i] = r * Math.sqrt(1 - (1 - k) ** 2) + (p.bump ? p.bump(U(i), V(i)) : 0); }
+    return d;
+  });
+  const ox = L[0] < 0 ? -1 : 1, oy = L[1] < 0 ? -w : w; // toward the light
+  const out = Array.from({ length: n }, (_, i) => {
+    const k = own[i];
+    if (k < 0) return null;
+    const lit = own[i + oy] < 0 || own[i + ox] < 0, dark = own[i - oy] < 0 || own[i - ox] < 0;
+    if (lit || dark) return dark ? edge : rim;
+    const p = parts[k], m = p.m || RAMP.marble, z = Z[k], gx = (z[i + 1] - z[i - 1]) / 2, gy = (z[i + w] - z[i - w]) / 2;
+    const s = (L[2] - gx * L[0] - gy * L[1]) / Math.hypot(gx, gy, 1);
+    if (!p.soft && [i - w, i + w, i - 1, i + 1].some(j => own[j] >= 0 && own[j] < k)) return m[m.length - 1]; // contour
+    let step = (s > .6 ? 0 : s > .42 ? 1 : s > .22 ? 2 : s > 0 ? 3 : 4) + (p.dim || 0);
+    if ([i - w, i + w, i - 1, i + 1].some(j => own[j] > k)) step++;                // the seam behind a part in front
+    if ([i + ox + oy, i + oy, i + ox, i + 2 * (ox + oy)].some(j => own[j] > k)) step++; // its shadow
+    if (p.mark) step += p.mark(U(i), V(i)) || 0;
+    return step > 8 ? edge : m[clamp(step, 0, m.length - 1)];
+  });
+  const get = (u, v) => { u = Math.round(u); v = Math.round(v); return u < -hw || u > hw || v < top || v > bot ? null : out[(v - top + 1) * w + u + hw + 1]; };
+  get.R = Math.hypot(hw + 1, Math.max(-top, bot) + 1);
+  return get;
+}
+const segD = (u, v, ax, ay, bx, by) => { // distance from (u, v) to a segment
+  const dx = bx - ax, dy = by - ay, k = clamp(((u - ax) * dx + (v - ay) * dy) / (dx * dx + dy * dy), 0, 1);
+  return Math.hypot(u - ax - k * dx, v - ay - k * dy);
+};
+// part outlines: an ellipse, a limb along a polyline tapering from r0 to r1, a polygon, a union
+const ell = (cx, cy, rx, ry = rx) => (u, v) => ((u - cx) / rx) ** 2 + ((v - cy) / ry) ** 2 <= 1;
+const limb = (P, r0, r1 = r0) => {
+  const L = [0]; for (let k = 1; k < P.length; k++) L.push(L[k - 1] + Math.hypot(P[k][0] - P[k - 1][0], P[k][1] - P[k - 1][1]));
+  return (u, v) => P.slice(1).some((q, k) => {
+    const [ax, ay] = P[k], dx = q[0] - ax, dy = q[1] - ay, s = clamp(((u - ax) * dx + (v - ay) * dy) / (dx * dx + dy * dy), 0, 1);
+    return Math.hypot(u - ax - s * dx, v - ay - s * dy) <= lerp(r0, r1, (L[k] + s * (L[k + 1] - L[k])) / L[L.length - 1]);
+  });
+};
+const poly = P => (u, v) => inPoly(P, u, v);
+const any = (...fs) => (u, v) => fs.some(f => f(u, v));
+const inPoly = (P, x, y) => {
+  let c = false;
+  for (let i = 0, j = P.length - 1; i < P.length; j = i++) if ((P[i][1] > y) !== (P[j][1] > y) && x < (P[j][0] - P[i][0]) * (y - P[i][1]) / (P[j][1] - P[i][1]) + P[i][0]) c = !c;
+  return c;
+};
+// a figure facing +u, turned to face dir (-1 flips it; the light stays on the upper left)
+// a face carved on a head centered (cx, cy): eyes, the shadow under the nose, a mouth (closed eyes: a line)
+const face = (cx, cy, shut = false) => (u, v) => {
+  const x = Math.round(u - cx), y = Math.round(v - cy);
+  return y === 0 && Math.abs(x) === 2 ? 3 : shut && y === 0 && Math.abs(x) === 1 ? 2 : y === 2 && x === 0 ? 1 : y === 3 && x === 0 ? 2 : 0;
+};
+const facing = (parts, dir) => parts.map(p => ({ ...p, in: (u, v) => p.in(u * dir, v), bump: p.bump && ((u, v) => p.bump(u * dir, v)), mark: p.mark && ((u, v) => p.mark(u * dir, v)) }));
+
+// a fountain bowl: walls gilded along the rim, a floor, and an underside curving in to a stem `foot` wide
+const bowlShape = (hw, depth, under, foot) => (u, v) => {
+  const au = Math.abs(u);
+  if (v < -depth - 2.5 || v > under + .5) return null;
+  if (v < -.5) {
+    if (au > hw + .5 || au < hw - 3.5) return null;
+    return au > hw - .5 ? C.ink : v < -depth + 1 ? C.gold : au < hw - 2.5 ? MARB[2] : marble(u, v, 6);
+  }
+  const w = foot + (hw - foot) * (1 - (Math.max(0, v) / under) ** 1.6);
+  if (au > w + .5) return null;
+  if (au > w - .7 || v > under - .5) return C.ink;
+  return v < 1.5 ? C.stoneTop : Math.abs(v - under * .45) < 1 ? C.gold : mod(Math.round(u), 7) === 0 ? MARB[2] : marble(u, v, 6);
+};
+// a fluted column with gold capital and base
+const column = (hw, hh) => (u, v) => {
+  const au = Math.abs(u), cap = Math.abs(v) > hh - 4, w = cap ? hw + 2 : hw;
+  if (Math.abs(v) > hh + .5 || au > w + .5) return null;
+  if (au > w - .5 || Math.abs(v) > hh - .5) return C.ink;
+  if (cap) return Math.abs(v) > hh - 2 ? C.goldDk : C.gold;
+  return mod(Math.round(u) + hw, 3) === 0 ? MARB[2] : u > hw * .4 ? MARB[1] : C.white;
+};
+
+// two tiers: a broad basin standing in the lake, and a bowl on a column above it. Water brims over the
+// bowl into the basin and over the basin into the lake.
+const BASIN = vessel({ x: CX, y: 554 + FY, hw: 94, depth: 13, inner: 91, qin: 6, qout: 10, vol: 1e5, shape: bowlShape(94, 13, 40, 36), reach: 100 });
+const BOWL = vessel({ x: CX, y: 420 + FY, hw: 54, depth: 10, inner: 51, qin: 8, qout: 14, vol: 1e5, shape: bowlShape(54, 10, 22, 9), reach: 60 });
+// the angel: stands on a plinth in the bowl with her wings swept down and a gold shell held up over her
+// head, right under the curtain. The shell brims over onto her wings; the water runs down them and off
+// the tips into the bowl.
+const ANGEL = { x: CX, y: 404 + FY };
+// a wing's feathers between its top edge top(a) and the scalloped tips of its flight feathers bot(a), a = |u| from
+// span[0] to span[1]: long flight feathers slanting out to their tips, under a band of rounded coverts along the top
+const fract = x => x - Math.floor(x);
+const featherParts = (top, bot, span, slant = .5, len = .3) => {
+  const inSpan = (u, v) => Math.abs(u) >= span[0] && Math.abs(u) <= span[1], q = (u, v) => (v - top(Math.abs(u))) / (bot(Math.abs(u)) - top(Math.abs(u)));
+  const f = (u, v) => fract((Math.abs(u) + (v - top(Math.abs(u))) * slant) / 5);
+  return [
+    { in: (u, v) => inSpan(u, v) && v >= top(Math.abs(u)) && v <= bot(Math.abs(u)), r: 3, soft: true, mark: (u, v) => f(u, v) < .2 && q(u, v) > len ? 2 : 0 },
+    { in: (u, v) => inSpan(u, v) && v >= top(Math.abs(u)) && q(u, v) <= len + .12 * Math.sin(Math.abs(u) * Math.PI / 3) ** 2, r: 2.5 },
+  ];
+};
+// the fountain angel: her wings swept down from the shoulders, so what brims over the shell runs down them and off the tips
+const AW_TOP = a => { const k = (a - 5) / 41; return -75 - 8 * Math.sin(Math.PI * k * .8) + k * 40; };
+const AW_BOT = a => { const k = (a - 5) / 41; return AW_TOP(a) + 5 + 24 * (1 - k) + 3 * Math.abs(Math.sin(a * Math.PI / 5)); };
+const angelShape = sprite(47, -100, 0, [
+  ...featherParts(AW_TOP, AW_BOT, [5, 46], .35, .32),
+  { in: (u, v) => v >= -47 && v <= 0 && Math.abs(u) <= 7 + (v + 47) * .16, r: 5, bump: (u, v) => 1.2 * Math.sin(u * 1.3 / (1 + (v + 47) * .012)) * clamp((v + 44) / 12, 0, 1) }, // robe, its folds spreading to the hem
+  { in: (u, v) => v >= -2.5 && v <= 0 && Math.abs(u) <= 14.5, m: RAMP.gold, r: 1.5 },                  // gold hem
+  { in: limb([[0, -69], [0, -48]], 6, 6.5), r: 5 },                                                     // body
+  { in: (u, v) => v >= -50 && v <= -46 && Math.abs(u) <= 8, m: RAMP.gold, r: 2 },                      // sash
+  { in: limb([[0, -76], [0, -69]], 2.4), r: 2 },                                                        // neck
+  { in: ell(0, -79, 5, 5.6), r: 4, mark: face(0, -79, true) },                                          // face turned up to the shell, eyes shut
+  { in: (u, v) => ell(0, -80.5, 5.9, 5.4)(u, v) && v < -81 + Math.max(0, Math.abs(u) - 3) * 1.8, m: RAMP.gold, r: 2, bump: (u, v) => .6 * Math.sin(u * 2 + v) }, // gold hair
+  ...[-1, 1].map(s => ({ in: limb([[s * 6, -66], [s * 13, -79], [s * 10, -94]], 3.2, 2.2), r: 2.5 })),   // arms raised, bent at the elbow
+  ...[-1, 1].map(s => ({ in: poly([[s * 7, -69], [s * 12, -79], [s * 16.5, -72], [s * 13, -64], [s * 8.5, -62]]), r: 2.5, bump: (u, v) => .7 * Math.sin((u * s + v) * 1.1) })), // sleeves fallen to the elbow
+  ...[-1, 1].map(s => ({ in: ell(s * 9.5, -95, 2.3, 2.4), r: 1.5, soft: true })),                        // hands under the shell
+]);
+const shellShape = sprite(14, -6, 7, [ // a gold scallop, ribbed out from its hinge
+  { in: (u, v) => v >= -.5 && v <= 4.5 && Math.abs(u) <= 13 - Math.max(0, v) * 1.5, m: RAMP.gold, r: 3, bump: (u, v) => .9 * Math.cos(Math.atan2(u, 9 - v) * 16) },
+  { in: (u, v) => v > 4 && v <= 6.5 && Math.abs(u) <= 3.5 + (v - 4), m: RAMP.gold, r: 1.5 },                       // its ears
+  { in: (u, v) => v >= -5.5 && v < .5 && Math.abs(u) >= 11 && Math.abs(u) <= 13.4, m: RAMP.gold, r: 1 },            // rim
+]);
+const SHELL = vessel({ x: CX, y: ANGEL.y - 98, hw: 13, depth: 5, inner: 10.5, qin: 14, qout: 40, shape: shellShape, reach: 16 });
+
+// cherubs: on clouds either side of the angel and on columns either side of the basin, each with a gold
+// urn on its shoulder that it tips into the fountain as the show goes on (see direct)
+const cherubShape = dir => sprite(11, -20, 1, facing([ // drawn facing +x, flipped to face the fountain
+  { in: any(ell(-6, -11, 4.5, 3.2), ell(-8, -14, 3, 2.4)), r: 2, bump: (u, v) => -.8 * fract((u + v) / 2.5) },  // a little wing behind
+  { in: limb([[-1, -3], [4, -1], [4, 1]], 2.2, 1.6), r: 2 },                                                    // the far leg
+  { in: ell(0, -6, 5, 5.4), r: 4 },                                                                             // round body
+  { in: limb([[0, -3], [6, -2], [7, 1]], 2.8, 1.7), r: 2.5 },                                                   // the near leg, foot hanging over
+  { in: ell(1, -14, 4.8, 4.6), r: 3.5, mark: (u, v) => u === 3 && v === -14 ? 3 : 0 },                         // head
+  { in: (u, v) => (ell(0, -16, 4.8, 3.4)(u, v) && v < -15) || ell(-3.5, -14, 2, 2.6)(u, v), m: RAMP.gold, r: 1.5, bump: (u, v) => .7 * Math.sin(u * 2.2) * Math.sin(v * 2.2) }, // gold curls
+  { in: limb([[2, -9], [5, -8]], 1.6), r: 1.5 },                                                                // the arm round the urn
+], dir));
+const urnShape = sprite(6, -10, 6, [ // upright, mouth at v = -9.5
+  ...[-1, 1].map(s => ({ in: limb([[s * 2, -7], [s * 5, -6], [s * 4.5, -2]], 1.1), m: RAMP.gold, r: 1 })),    // handles
+  { in: ell(0, 0, 4.6, 5.2), m: RAMP.gold, r: 3.5, bump: (u, v) => Math.abs(v + 1) < .8 ? .6 : 0 },
+  { in: limb([[0, -8], [0, -4]], 1.6, 1.4), m: RAMP.gold, r: 1.5 },
+  { in: ell(0, -9, 3.2, 1.2), m: RAMP.gold, r: 1 },
+  { in: limb([[0, 4], [0, 6]], 1.8, 2.6), m: RAMP.gold, r: 1.5 },
+], C.ink, GILT[0]);
+const cloudShape = sprite(18, -8, 6, [[-14, 2, 4], [14, 2, 4], [-9, 0, 6], [9, 0, 6], [0, -2, 7.5], [0, 3, 5]].map(([x, y, r]) => ({ in: (u, v) => v <= 5 && Math.hypot(u - x, v - y) < r, m: RAMP.cloud, r })), hex('#9fd2ee'), hex('#cfe8f8'));
+const CHERUBS = [
+  ...[-1, 1].map(s => ({ s, hi: true, x: s < 0 ? 78 : MX(78), y: 350 + FY, sp: 85 })),
+  ...[-1, 1].map(s => ({ s, hi: false, x: s < 0 ? 56 : MX(56), y: 500 + FY, sp: 75 })),
+].map(c => ({ ...c, dir: -c.s, shape: cherubShape(-c.s), pour: 0, tilt: .3 }));
+const urnAt = c => [c.x + c.dir * 8, c.y - 11]; // held up on the shoulder
+const urnAng = c => c.dir * c.tilt;
+// jets rising out of the basin: the outer pair arc over the rim of the bowl and land in it, the inner
+// pair arc out over the basin (see direct)
+const SPOUTS = [
+  ...[-1, 1].map(s => ({ x: CX + s * 80, y: 537 + FY, vx: -s * 40, vy: -360, power: 0 })),
+  ...[-1, 1].map(s => ({ x: CX + s * 26, y: 537 + FY, vx: s * 46, vy: -250, power: 0 })),
+];
+
+const DK = 1.6; // the brooding demons' scale
+const scaled = (parts, k) => parts.map(p => ({ ...p, in: (u, v) => p.in(u / k, v / k), r: (p.r ?? 4) * k, bump: p.bump && ((u, v) => p.bump(u / k, v / k) * k), mark: p.mark && ((u, v) => p.mark(u / k, v / k)) }));
+// a bat wing: bones from the shoulder out to the wrist (a claw on it) and down the fingers to their tips, the
+// membrane between each pair of fingers sagging, a scallop bitten out of its edge
+const batWing = (sh, wr, tips, root, claw, bone = 1.4) => {
+  const panels = [[sh, wr, tips[0]], ...tips.slice(1).map((p, i) => [wr, tips[i], p]), [wr, tips[tips.length - 1], root, sh]];
+  const bites = [...tips.slice(1), root].map((p, i) => {
+    const q = tips[i], m = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2], L = Math.hypot(p[0] - q[0], p[1] - q[1]), o = Math.hypot(m[0] - wr[0], m[1] - wr[1]);
+    return [m[0] + (m[0] - wr[0]) / o * L * .3, m[1] + (m[1] - wr[1]) / o * L * .3, L * .42];
+  });
+  const bitten = (u, v) => bites.some(([bx, by, r]) => Math.hypot(u - bx, v - by) < r);
+  return [
+    ...panels.map(P => ({ in: (u, v) => inPoly(P, u, v) && !bitten(u, v), r: 2.5, dim: 1, soft: true, bump: (u, v) => -1.5 * Math.hypot(u - wr[0], v - wr[1]) / 20 })),
+    { in: any(limb([sh, wr], bone, bone * .8), ...tips.map(p => limb([wr, p], bone * .8, .6)), limb([wr, claw], 1, .4)), r: 1.5 },
+  ];
+};
+// fallen angels: white marble demons brooding on corbels down the front, after the 19th-century
+// Lucifers: seated on a rock, head bowed onto a hand, bat wings folded up behind, small horns, and
+// one eye that lights up pink. They're solid, so what runs off the rose and the towers splashes over them.
+const demonShape = dir => sprite(Math.ceil(26 * DK), Math.floor(-62 * DK), 0, facing(scaled([ // drawn facing +x (toward the middle)
+  ...batWing([-3, -34], [-12, -57], [[-25, -40], [-25, -24], [-17, -11]], [-5, -16], [-10, -61.5], 1.3),
+  { in: ell(-2, -4, 13, 6), r: 3, bump: (u, v) => .8 * vnoise(u * .5 + 9, v * .5) },                      // the rock
+  { in: limb([[-1, -11], [6, -7], [4, 0]], 3.4, 2.6), r: 2.5 },                                            // the far leg
+  { in: limb([[0, -13], [3, -24], [4, -33]], 5, 5.2), r: 3.5, bump: (u, v) => .4 * Math.sin(v * 1.6) * (u > 2) }, // torso, leaning in, ribs showing
+  { in: any(ell(6.5, -42.5, 3.8, 3.6), ell(4.5, -38.5, 2.4, 2.2)), r: 2, dim: 1, bump: (u, v) => .6 * Math.sin(u * 2.5) * Math.sin(v * 2.5) }, // curls at the nape
+  { in: limb([[0, -12], [13, -19]], 4, 3.4), r: 3 },                                                       // the raised knee
+  { in: limb([[13, -19], [14, -2]], 3, 2.3), r: 2.5 },
+  { in: ell(15.5, -1, 3.6, 1.6), r: 1 },
+  { in: limb([[4, -33], [13, -21]], 2.6, 2.2), r: 2 },                                                     // the arm, its elbow on the knee
+  { in: ell(9, -40, 4.4, 4.8), r: 3, mark: (u, v) => Math.hypot(u - 11.5, v + 41) < .7 ? 2 : Math.hypot(u - 12.5, v + 38.5) < .6 ? 1 : 0 }, // bowed head, brow knit
+  { in: limb([[13, -21], [11.5, -35]], 2.2, 1.8), r: 2 },                                                  // forearm, the hand under the chin
+  { in: ell(11, -36.5, 2.4, 1.8), r: 1.5 },
+  { in: any(limb([[7.5, -43.5], [6, -47], [3, -48.5], [1.5, -46.5]], 1.4, .5), limb([[10.5, -44], [10.5, -47.5], [8, -50]], 1.2, .4)), m: RAMP.horn, r: 1 }, // horns curling back
+], DK), dir));
+// lower down the towers, a pair standing in the same pose with their wings half raised: an angel on the
+// left with feathered wings, a robe and a halo, and a devil on the right with bat wings, horns, goat legs
+// and a tail, its eyes lighting up with the others'. Each holds out a sword pointing in to the middle: what runs
+// off its wings pools on the blade against the guard, and when the blade is full it dips the point and
+// pours it all out (see SWORDS).
+const PW_TOP = a => a < 17 ? lerp(-56, -84, ((a - 5) / 12) ** 2 * (3 - 2 * (a - 5) / 12)) : lerp(-84, -63, ((a - 17) / 27) ** 1.2);
+const PW_BOT = a => PW_TOP(a) + (a < 17 ? lerp(10, 25, (a - 5) / 12) : lerp(25, 4, (a - 17) / 27)) + 2.5 * Math.abs(Math.sin(a * Math.PI / 5));
+const PAIR_HAND = [-19, -46]; // the sword hand, out on the -u side
+const pairParts = devil => [
+  ...(devil
+    ? [-1, 1].flatMap(s => facing(batWing([5, -54], [17, -86], [[44, -64], [38, -58], [27, -57], [15, -55]], [7, -48], [14, -90.5]), s))
+    : featherParts(PW_TOP, PW_BOT, [5, 44], .45, .3)),
+  ...(devil ? [
+    { in: limb([[2, -36], [11, -32], [16, -22], [13, -13]], 1.4, .9), r: 1 },                                      // tail
+    { in: poly([[13, -16], [17.5, -9], [10, -10.5]]), m: RAMP.horn, r: 1.5 },                                      // its arrowhead
+    ...[-1, 1].flatMap(s => facing([
+      { in: limb([[3, -37], [6.5, -22]], 3.8, 2.8), r: 3 },                                                        // goat legs: thigh,
+      { in: limb([[6.5, -22], [3.5, -10]], 2.5, 1.7), r: 2 },                                                      // shin bent back,
+      { in: limb([[3.5, -10], [5, -2]], 1.6, 1.4), r: 1.5 },
+      { in: ell(5.5, -1.2, 2.4, 1.7), m: RAMP.horn, r: 1.5 },                                                      // cloven hoof
+    ], s)),
+    { in: limb([[0, -55], [0, -36]], 7.5, 5), r: 4.5, mark: (u, v) => (v > -45 && v < -37 && Math.abs(u) < 3.5 && mod(v, 3) < .6) || (Math.abs(u) < .6 && v > -50 && v < -37) ? 1 : 0 }, // chest and belly
+  ] : [
+    { in: (u, v) => v >= -40 && v <= 0 && Math.abs(u) <= 5.5 + (v + 40) * .12, r: 4, bump: (u, v) => Math.sin(u * 1.5 / (1 + (v + 40) * .015)) * clamp((v + 36) / 10, 0, 1) }, // robe
+    { in: (u, v) => v >= -2 && v <= 0 && Math.abs(u) <= 10.5, m: RAMP.gold, r: 1 },
+    { in: limb([[0, -55], [0, -39]], 6, 5), r: 4 },
+    { in: (u, v) => v >= -42 && v <= -39 && Math.abs(u) <= 6, m: RAMP.gold, r: 1.5 },                              // girdle
+  ]),
+  { in: limb([[0, -58], [0, -54]], 2.2), r: 2 },
+  { in: ell(0, -62, 4.6, 5.2), r: 3.5, mark: face(0, -62, !devil) },
+  ...(devil
+    ? [{ in: any(...[-1, 1].map(s => limb([[s * 3, -65], [s * 8, -67.5], [s * 10.5, -72], [s * 9, -77]], 2.2, .6)), ...[-1, 1].map(s => limb([[s * 4, -62], [s * 8, -64.5]], 1.2, .5))), m: RAMP.horn, r: 1.5 }] // horns, pointed ears
+    : [{ in: (u, v) => ell(0, -63.5, 5.6, 5)(u, v) && v < -64 + Math.max(0, Math.abs(u) - 2.5) * 2, m: RAMP.gold, r: 2, bump: (u, v) => .6 * Math.sin(u * 2 + v) }]),
+  { in: limb([[-6, -53], [-12, -47.5], [-17.5, -46]], 3, 2.4), r: 2.5 },                                             // the sword arm, held out
+  { in: ell(...PAIR_HAND, 2.6, 2.6), r: 2, soft: true },
+  { in: limb([[6, -53], [10, -44], [12, -36]], 3, 2.2), r: 2.5 },                                                  // the other, hanging open
+  { in: ell(12.5, -34.5, 2, 2.6), r: 1.5, soft: true },
+];
+const PAIR = [sprite(46, -90, 0, facing(pairParts(false), -1)), sprite(46, -90, 0, pairParts(true))]; // the angel turned, so both swords point in
+const DEMONS = [
+  ...[-1, 1].map(s => ({ x: s < 0 ? 118 : MX(118), y: 715, dir: -s, kind: 'brood' })), // in the gallery under the rose, catching what runs off it
+  { x: 48, y: 860, kind: 'angel', s: 1 }, { x: MX(48), y: 860, kind: 'devil', s: -1 }, // on the towers, between the windows (s: the side the sword's held out on)
+].map(d => ({ ...d, shape: d.kind === 'brood' ? demonShape(d.dir) : PAIR[d.kind === 'angel' ? 0 : 1] }));
+
+// the swords: vessels on a pivot at the hand. Blade along u with the point toward the side s it's held out on, the
+// guard nearer the hand; the guard dams the water while the point is raised and the point is open, so lowering it pours.
+const SWORD_HW = 14, GRIP = 18, SWORD_AIM = .15, SWORD_RATE = 110, SWORD_SP = 230; // aim: the point raised this much to shoot; rate: water spent a second
+const swordShape = (devil, s) => sprite(24, -8, 8, facing([ // carved with the point at -u, turned to point toward s
+  { in: (u, v) => u >= -SWORD_HW && u < 13 && v >= 0 && v <= (devil ? 3 + (mod(u, 4) < 2 ? 1 : 0) : 3) - Math.max(0, -9 - u) * .65, m: devil ? RAMP.horn : RAMP.marble, r: 1.5, // the blade, flat along the top
+    mark: (u, v) => !devil && u > -9 && u < 11 && Math.abs(v - 1.5) < .6 ? 1 : 0 },                       // its fuller
+  { in: devil ? any(limb([[14, 5], [12, 0], [14, -6.5]], 1.5, .6), limb([[14, 0], [12, 5], [10, 7.5]], 1.4, .5)) : (u, v) => u >= 13 && u <= 15 && v >= -6.5 && v <= 6.5, m: RAMP.gold, r: 1 }, // the crossguard
+  { in: (u, v) => u > 15 && u <= 21 && v >= 0 && v <= 3, m: devil ? RAMP.horn : RAMP.gold, r: 1, mark: (u, v) => mod(u, 2) < 1 ? 1 : 0 }, // wrapped grip
+  { in: ell(22.5, 1.5, 2, 2.2), m: RAMP.gold, r: 1.5 },                                                   // pommel
+], -s));
+const SWORDS = DEMONS.filter(d => d.s).map(d => ({
+  d, th: .3, pour: false, wait: 0, shape: swordShape(d.kind === 'devil', d.s),
+  hand: [d.x - d.s * PAIR_HAND[0], d.y + PAIR_HAND[1]],
+  V: vessel({ hw: SWORD_HW, depth: 7, inner: 13, qin: 22, qout: 9, sword: true, lips: d.s < 0 ? [0, 6.5] : [6.5, 0], reach: 26 }),
+}));
+// hang each sword's blade off its hand at its angle: the point rises with th > 0
+function placeSwords() {
+  for (const S of SWORDS) {
+    const V = S.V, g = -S.d.s * GRIP; // the grip is at -s·GRIP along the blade
+    V.ang = -S.d.s * S.th;
+    const [gx, gy] = toScreen(0, 0, V.ang, g, 1.5);
+    V.x = S.hand[0] - gx; V.y = S.hand[1] - gy;
+  }
+}
+function drawSwords() { for (const S of SWORDS) raster(S.V.x, S.V.y, S.V.ang, 26, S.shape); }
+// gothic features standing out from the front: hood moulds over the windows, the gallery's arcade and the
+// portal (water landing on one runs down both sides of the arch and drips off the label stops at its
+// feet), and sloped sills under the windows, so the water pours over the windows on its way down
+const HOODS = [
+  ...[42, MX(42)].flatMap(cx => [
+    { cx, hw: 18, spring: 331, sill: 443 }, { cx, hw: 22, spring: 504, sill: 543 }, { cx, hw: 16, spring: 628, sill: 733 },
+    { cx, hw: 16, spring: 908, sill: 1013 }, { cx, hw: 22, spring: 1110 }]),
+  ...[108, 132, 156, 204, 228, 252].map(cx => ({ cx, hw: 7.5, spring: 594, t: 3 })), // the gallery's arcade
+  { cx: CX, hw: 75, spring: 964, gap: 26 },                                           // the great portal, open at the apex for the curtain
+];
+const hoodShape = ({ cx, hw, spring, t = 4, gap = 0 }) => (u, v) => {
+  const x = cx + u, y = spring + v, au = Math.abs(u), arch = h => inArch(x, y, cx, h, spring);
+  if (au < gap) return null;
+  if (v <= 0) {
+    if (!arch(hw + t) || arch(hw)) return null;
+    return !arch(hw + t - .9) ? C.ink : !arch(hw + t - 1.9) ? C.white : !arch(hw + t - 2.7) ? C.gold : !arch(hw + .9) ? MARB[2] : C.ink;
+  }
+  if (v > 5 || au < hw || au > hw + t + (v > 2 ? 3 : 0)) return null; // the label stops, turned outward
+  return v > 4 || au < hw + .9 || au > hw + t + 2.1 ? C.ink : v < 3 && au > hw + t - .9 ? C.white : MARB[1];
+};
+const sillShape = hw => (u, v) => { // a sill, its top weathered down toward both ends
+  const au = Math.abs(u), top = -1 + au / hw * 1.5;
+  if (au > hw + .5 || v < top - .5 || v > 2.5) return null;
+  return v > 1.5 || au > hw - .5 ? C.ink : v < top + .9 ? C.white : MARB[2];
+};
+function drawFeatures() {
+  HOODS.forEach((h, k) => {
+    const t = h.t || 4;
+    still('hood' + k, h.cx, h.spring, Math.max(h.hw + t + 5, (h.hw + t) * 1.8), hoodShape(h));
+    if (h.sill) still('sill' + k, h.cx, h.sill, h.hw + 7, sillShape(h.hw + 6));
+  });
+}
+
+// spouts that join the show partway through (see direct): herald angels by the rose blowing gold
+// trumpets, and horned gargoyles down by the lake that turn their heads to sweep,
+// and every so often dip them to dump their water straight down. The jets fly real arcs and carry on as
+// ordinary water wherever they land. a: aim above the horizontal, toward the middle (negative is up).
+const GUN_LEN = 16; // from the pivot to the mouth, or the trumpet's bell
+const GUNS = [
+  ...[-1, 1].map(s => ({ s, kind: 'angel', x: s < 0 ? 98 : MX(98), y: 446, aim: -.45, sp: 265, w: 3, at: 9.5 })),
+  ...[-1, 1].map(s => ({ s, kind: 'gargoyle', x: s < 0 ? 9 : MX(9), y: 572 + FY, aim: -1.3, sp: 330, w: 3, at: 2.6 })),
+].map(g => ({ ...g, show: 0, power: 0, a: g.aim }));
+const gunAng = g => g.s < 0 ? g.a : Math.PI - g.a;
+// a gargoyle reaching out of the wall, facing +u, jaws open round the line v = 0 at the mouth
+const GARGOYLE = [
+  { in: poly([[-15, -1], [-10, -13], [-6, -14], [-3, -10], [-1, -4]]), r: 2, bump: (u, v) => -.9 * fract((u - v * .6) / 3.5) }, // a folded wing
+  { in: limb([[-17, 4], [-19, 7], [-16, 9]], 1.3, .7), r: 1 },                                         // tail
+  { in: ell(-10, 3.5, 4.8, 4.2), r: 3 },                                                                 // haunch
+  { in: limb([[-10, 6], [-8, 8.5]], 1.6), r: 1 },                                                       // hind foot
+  { in: limb([[-18, 2], [-5, 1], [3, -1]], 3.6, 3.4), r: 3, bump: (u, v) => v < 0 ? .5 * Math.sin(u * 1.4) : 0 }, // body, its spine ridged
+  { in: limb([[1, 1], [2.5, 5], [3.5, 8]], 2, 1.6), r: 1.5, mark: (u, v) => v > 7.5 && mod(u, 1.6) < .6 ? 1 : 0 }, // a foreleg, its claws on the stone
+  { in: any(limb([[3, -5.5], [-1, -9.5], [-5, -11.5]], 1.6, .6), limb([[6.5, -6], [5.5, -10], [3, -13]], 1.3, .5)), m: RAMP.horn, r: 1 }, // swept-back horns
+  { in: poly([[1.5, -3], [-2.5, -7.5], [2, -5.5]]), r: 1 },                                             // an ear
+  { in: ell(6, -2.5, 5.4, 4.6), r: 3 },                                                                 // head
+  { in: poly([[8, -6], [14, -4], [17, -1.5], [16, -.5], [8, -.5]]), r: 2, mark: (u, v) => v > -1.2 && v < -.4 && u > 10 && mod(u, 2) < 1 ? -2 : 0 }, // the upper jaw, teeth along it
+  { in: poly([[7, 1.5], [15, 1.5], [14, 3.5], [8, 4.5]]), r: 1.5 },                                    // the lower jaw
+  { in: limb([[3.5, -5.5], [9.5, -5]], 1.4), r: 1, mark: (u, v) => Math.hypot(u - 8, v + 3.6) < 1 ? 3 : 0 }, // a heavy brow over a deep eye
+];
+const gargoyle = sprite(18, -14, 9, GARGOYLE);
+// the right-hand ones are turned the other way round, so they're carved upside down to stand right way up, lit from the other corner
+const gargoyleR = sprite(18, -9, 14, GARGOYLE.map(p => ({ ...p, in: (u, v) => p.in(u, -v), bump: p.bump && ((u, v) => p.bump(u, -v)), mark: p.mark && ((u, v) => p.mark(u, -v)) })), C.ink, hex('#4a90b0'), LIGHT.map((c, k) => k < 2 ? -c : c));
+// a pair crouched on the towers' cornices, wings half open, glaring in at the crown (their eyes light with the demons')
+const CROWN_EYE = [8, -24];
+const crouchShape = dir => sprite(16, -32, 0, facing([
+  { in: poly([[3, -22], [6, -31], [9, -25]]), r: 1.5 },                                                 // the far wing's tip
+  ...batWing([-1, -19], [-8, -31], [[-15, -24], [-15, -15], [-10, -9]], [-4, -11], [-6, -32]),          // the near wing, half open
+  { in: limb([[-6, -3], [-12, -2], [-14, -6], [-11, -8]], 1.5, .8), r: 1 },                             // tail
+  { in: ell(-3, -7, 6, 6.5), r: 4 },                                                                    // haunch
+  { in: ell(-.5, -1.4, 5.5, 1.7), r: 1, mark: (u, v) => u > 3 && mod(u, 1.6) < .6 ? 1 : 0 },           // hind foot, clawed
+  { in: limb([[-3, -10], [3, -19]], 5, 4.4), r: 3.5, bump: (u, v) => .4 * Math.sin(v * 1.7) * (u > 1) },  // chest
+  { in: limb([[4, -15], [5.5, -7], [5.5, -1.5]], 2.1, 1.6), r: 1.5 },                                  // foreleg
+  { in: ell(7, -1.2, 2.8, 1.4), r: 1, mark: (u, v) => u > 7 && mod(u, 1.4) < .5 ? 1 : 0 },
+  { in: any(limb([[3, -26], [0, -30], [-3.5, -31]], 1.5, .5), limb([[6, -27], [6.5, -30.5], [4.5, -32]], 1.1, .4)), m: RAMP.horn, r: 1 }, // horns
+  { in: poly([[1.5, -24], [-2.5, -28], [2.5, -26.5]]), r: 1 },                                          // an ear
+  { in: ell(5, -23, 4.4, 4), r: 3 },                                                                    // head
+  { in: poly([[7, -26.5], [13.5, -24.5], [13.5, -22], [8, -21]]), r: 1.5 },                             // the upper jaw
+  { in: poly([[7, -19.5], [12.5, -20], [11, -17.5], [7, -17]]), r: 1 },                                // the lower, hanging open
+  { in: limb([[3, -26], [8.5, -25.5]], 1.2), r: 1, mark: (u, v) => Math.hypot(u - CROWN_EYE[0], v - CROWN_EYE[1]) < 1 ? 3 : 0 }, // brow
+], dir));
+const CROWN = [-1, 1].map(s => ({ s, x: s < 0 ? 64 : MX(64), y: 163, shape: crouchShape(-s), power: 0 }));
+const CROWN_MOUTH = [14, -21], CROWN_JET = [110, 190]; // just past its open jaws; the bark's speed in toward the middle, and up
+// a herald angel facing +x, feet on its bracket at v = 0, the trumpet at its lips 28px up
+const heraldShape = dir => sprite(14, -40, 0, facing([
+  ...featherParts(a => -24 - (a - 1) * 1.1, a => -10 - (a - 1) * .9 + 1.5 * Math.abs(Math.sin(a * Math.PI / 4)), [1, 14], .4, .35).map(p => ({ ...p, in: (u, v) => u < 0 && p.in(u, v) })), // a wing raised behind
+  { in: poly([[-3, -24], [3, -24], [5, -12], [7, -2], [6, 0], [-6, 0], [-9, -2], [-5, -13]]), r: 3.5, bump: (u, v) => .9 * Math.sin((u + v * .15) * 1.6) * clamp((v + 20) / 10, 0, 1) }, // robe, trailing behind
+  { in: (u, v) => v >= -2 && poly([[-3, -24], [3, -24], [5, -12], [7, -2], [6, 0], [-6, 0], [-9, -2], [-5, -13]])(u, v), m: RAMP.gold, r: 1 },
+  { in: limb([[0, -25], [0, -19]], 3.2, 3), r: 2.5 },
+  { in: ell(.5, -31, 3.6, 4), r: 3, bump: (u, v) => Math.hypot(u - 3, v + 29.5) < 1.6 ? .8 : 0, mark: (u, v) => u === 2 && v === -32 ? 3 : 0 },    // head, the cheeks puffed
+  { in: any((u, v) => ell(-.5, -32.5, 4, 3.2)(u, v) && u < 2.5, limb([[-2.5, -31], [-3.5, -26.5]], 1.6, 1)), m: RAMP.gold, r: 1.5, bump: (u, v) => .6 * Math.sin(u * 2.4 + v) }, // gold hair
+  { in: limb([[0, -23], [4.5, -22.5], [5, -27]], 1.6, 1.3), r: 1.5 },                                 // the arm raising the trumpet
+], dir));
+const HERALD = [heraldShape(1), heraldShape(-1)];
+const trumpet = sprite(GUN_LEN + 1, -5, 5, [ // flaring to its bell at u = GUN_LEN
+  { in: (u, v) => u >= 0 && u <= GUN_LEN && Math.abs(v) <= (u < 10 ? 1.2 : 1.2 + (u - 10) ** 1.6 / 6), m: RAMP.gold, r: 1.5 },
+  { in: (u, v) => u >= 4 && u <= 5 && Math.abs(v) <= 1.8, m: RAMP.gold, r: 1 },                       // a knop on the tube
+], GILT[0], GILT[3]);
+function drawGuns() {
+  for (const g of GUNS) {
+    if (g.show <= 0) continue;
+    if (g.kind === 'gargoyle') { raster(g.x, g.y, gunAng(g), 26, g.s < 0 ? gargoyle : gargoyleR, g.show); continue; }
+    const fx = g.x + g.s * 2, fy = g.y + 28; // the angel stands just behind its trumpet, on a bracket in the wall
+    raster(fx, fy + 3, 0, 9, stoneRect(7, 2), g.show);
+    const H1 = HERALD[g.s < 0 ? 0 : 1]; raster(fx, fy, 0, H1.R, H1, g.show);
+    raster(g.x, g.y, gunAng(g), GUN_LEN + 2, trumpet, g.show);
+  }
+}
+
+// a gold censer swinging on a long chain across the curtain: when it swings through, the curtain parts
+// round it and splashes off to the sides, and the water knocks it about; out at the ends of its swing the
+// curtain falls clean. bal: gravity (G_ACC) over the chain's length; pump: the push that keeps it swinging
+const CENSER = { x: CX, y: 590, L: 100, a: .2, w: 0, I: 9000, bal: 4.2, fric: .25, pump: 0 };
+const censerShape = sprite(10, -13, 9, [
+  { in: (u, v) => v < -10 && Math.abs(Math.hypot(u, v + 11.5) - 1.6) < .9, m: RAMP.gold, r: 1 },                   // the ring the chain hangs from
+  { in: (u, v) => v <= -2 && Math.hypot(u, (v + 2) * 1.1) <= 8.5, m: RAMP.gold, r: 4, mark: (u, v) => v < -4 && mod(u + 1, 4) < 1 && mod(v, 3) < 1 ? 3 : 0 }, // a domed, pierced lid
+  { in: (u, v) => v > -2.5 && v < 6 && Math.abs(u) <= 9.5 - Math.max(0, v - 1) * .9, m: RAMP.gold, r: 3, bump: (u, v) => Math.abs(v - .5) < .8 ? .7 : 0 }, // the bowl, banded
+  { in: (u, v) => v >= 6 && v <= 9 && Math.abs(u) <= 2.5 + (v - 6) * .8, m: RAMP.gold, r: 1.5 },                    // its foot
+], GILT[0], GILT[3]);
+const censerAt = () => [CENSER.x + Math.sin(CENSER.a) * CENSER.L, CENSER.y + Math.cos(CENSER.a) * CENSER.L];
+function drawCenser() {
+  const [cx, cy] = censerAt();
+  if (drawOn) for (let k = 0; k < CENSER.L - 12; k += 2) put(CENSER.x + Math.sin(CENSER.a) * k, CENSER.y + Math.cos(CENSER.a) * k, k & 2 ? C.goldDk : C.gold);
+  raster(cx, cy, -CENSER.a, 14, censerShape);
+}
+
+function glow(eyes) { // eyes that light up pink with SHOW.evil
+  for (const [ex, ey] of eyes) {
+    put(ex, ey, lerpC(MARB[3], C.evil, SHOW.evil));
+    if (SHOW.evil > .3) for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) mix(ex + dx, ey + dy, C.evil, SHOW.evil * .35);
+  }
+}
+function drawMachines(t) {
+  still('stem', CX, 491 + FY, 52, column(6, 50));                   // the stem between the tiers
+  still('plinth', CX, 412 + FY, 14, stoneRect(12, 8, 7));           // the angel's plinth
+  still('angel', ANGEL.x, ANGEL.y, angelShape.R, angelShape);
+  CHERUBS.forEach((c, k) => {
+    if (c.hi) still('cloud' + k, c.x, c.y + 7, cloudShape.R, cloudShape);
+    else still('column' + k, c.x, 548 + FY, 48, column(7, 46));
+    still('cherub' + k, c.x, c.y, c.shape.R, c.shape);
+    const [ux, uy] = urnAt(c);
+    raster(ux, uy, urnAng(c), 12, urnShape);
+  });
+  DEMONS.forEach((d, k) => { still('corbel' + k, d.x, d.y + 4, 26, stoneRect(24, 4, 9)); still('demon' + k, d.x, d.y, d.shape.R, d.shape); });
+  vessels.forEach((V, k) => V.sword || still('vessel' + k, V.x, V.y, V.reach || Math.hypot(V.hw + 1, V.depth + 6), V.shape || cupShape(V.hw, V.depth)));
+  drawSwords();
+  CROWN.forEach((g, k) => still('crown' + k, g.x, g.y, g.shape.R, g.shape));
+  if (!drawOn) return;
+  for (const d of DEMONS) {
+    if (d.kind === 'angel') { // a halo, where the others have lit eyes
+      for (let k = 0; k < 40; k++) { const a = k / 40 * Math.PI * 2; put(d.x + Math.cos(a) * 6, d.y - 70 + Math.sin(a) * 2, Math.sin(a) < 0 ? C.goldLt : C.gold); }
+      continue;
+    }
+    const eyes = d.kind === 'devil' ? [[d.x - 2, d.y - 63], [d.x + 2, d.y - 63]] : [[Math.round(d.x + d.dir * 11 * DK), Math.round(d.y - 40 * DK)]];
+    glow(eyes);
+  }
+  glow(CROWN.map(g => [g.x - g.s * CROWN_EYE[0], g.y + CROWN_EYE[1]]));
+  // the angel's halo, flaring with rays at the finale
+  const hx = ANGEL.x, hy = ANGEL.y - 87;
+  for (let k = 0; k < 48; k++) { const a = k / 48 * Math.PI * 2; put(hx + Math.cos(a) * 8, hy + Math.sin(a) * 2.5, Math.sin(a) < 0 ? C.goldLt : C.gold); }
+  if (SHOW.halo > 0) for (let k = 0; k < 16; k++) {
+    const a = k / 16 * Math.PI * 2 + t * .5, L = (10 + 10 * SHOW.halo) * (k & 1 ? .6 : 1);
+    for (let r = 12; r < 12 + L; r++) mix(hx + Math.cos(a) * r, hy + 6 + Math.sin(a) * r, C.goldLt, SHOW.halo * .8 * (1 - (r - 12) / L));
+  }
+  // gold nozzles of the basin jets, standing out of the water
+  for (const p of SPOUTS) { put(p.x, p.y + 1, C.goldLt); put(p.x, p.y + 2, C.gold); put(p.x, p.y + 3, C.goldDk); }
+}
+
+// ---- the hand: the cursor, a solid glove the water lands on ----------------
+// Pressing on anything on an axle takes hold of it to turn it by hand.
+const GLOVE = { o: C.ink, w: C.white, s: hex('#d8d2c4'), c: C.gold, d: C.goldDk };
+const POINT = [
+  '....oo..........',
+  '...owwo.........',
+  '...owso.........',
+  '...owso.........',
+  '...owsooo.......',
+  '...owsowsooo....',
+  '...owsowsowsooo.',
+  'oooowsowsowsowso',
+  'owwswwwwwwwwwwso',
+  'owsswwwwwwwwwwso',
+  '.owwwwwwwwwwwwso',
+  '..owwwwwwwwwwsso',
+  '..owwwwwwwwwwso.',
+  '...owwwwwwwwsso.',
+  '...occcccccccco.',
+  '...ocdcdcdcdcdo.',
+  '...oooooooooooo.',
+];
+const FIST = [
+  '....oo.oo.......',
+  '...owsowsooo....',
+  '...owsowsowsooo.',
+  ...POINT.slice(7),
+];
+const HAND = { on: false, tx: 0, ty: 0, x: 0, y: 0, vx: 0, vy: 0, down: false, grab: null, phi: 0, turn: 0, base: 0, x0: 0, y0: 0, wet: 0 };
+
+// everything on an axle, which the hand can turn but never move: the angle it turns (with the sign
+// that makes it clockwise on screen), the axle, and hit(x, y) < 1 where the hand is touching it
+const disc = (at, r) => (x, y) => { const [px, py] = at(); return Math.hypot(x - px, y - py) / r; };
+const box = (at, hw, hh, ang = () => 0, off = 0) => (x, y) => {
+  const [px, py] = at(), a = ang(), ca = Math.cos(a), sa = Math.sin(a), dx = x - px, dy = y - py;
+  return Math.max(Math.abs(dx * ca + dy * sa) / hw, Math.abs(-dx * sa + dy * ca - off) / hh);
+};
+const pos = o => () => [o.x, o.y];
+const axle = (o, key, at, hit, sg = 1) => ({ o, key, at, hit, sg });
+const AXLES = [
+  axle(BODY.d1, 'a', pos(D1), disc(pos(D1), D1.r * .9)),
+  ...SIDE.map((sd, i) => axle(BODY.d2[i], 'a', pos(sd.d2), disc(pos(sd.d2), sd.d2.r + 2))),
+  axle(CENSER, 'a', pos(CENSER), disc(censerAt, 12), -1),
+];
+const handAngle = A => { const [px, py] = A.at(); return Math.atan2(HAND.y - py, HAND.x - px); };
+// pressing on a part takes hold of it; dragging then turns it about its axle
+function press() {
+  HAND.on = HAND.down = true;
+  HAND.x = HAND.tx; HAND.y = HAND.ty;
+  let bs = 1;
+  for (const A of AXLES) { const s = A.hit(HAND.x, HAND.y); if (s < bs) { bs = s; HAND.grab = A; } }
+  if (HAND.grab) { HAND.phi = handAngle(HAND.grab); HAND.turn = 0; HAND.base = HAND.grab.o[HAND.grab.key]; }
+}
+function release() { HAND.down = false; HAND.grab = null; }
+function moveHand() {
+  HAND.vx = lerp(HAND.vx, (HAND.tx - HAND.x) / DT, .5); HAND.vy = lerp(HAND.vy, (HAND.ty - HAND.y) / DT, .5);
+  HAND.x = HAND.tx; HAND.y = HAND.ty;
+  const A = HAND.grab;
+  if (A) { // spin it toward however far the hand has gone round the axle; let go mid-turn and it keeps spinning
+    const phi = handAngle(A);
+    HAND.turn += mod(phi - HAND.phi + Math.PI, Math.PI * 2) - Math.PI; HAND.phi = phi;
+    A.o.w = clamp((HAND.base + A.sg * HAND.turn - A.o[A.key]) / DT, -15, 15);
+  }
+}
+function drawHand() {
+  if (!HAND.on) return;
+  const rows = HAND.down ? FIST : POINT, ox = HAND.x - (HAND.down ? 8 : 4), oy = HAND.y - (HAND.down ? 8 : 0); // pressed: a fist, whether or not it caught hold of anything
+  for (let r = 0; r < rows.length; r++) for (let q = 0; q < 16; q++) {
+    const ch = rows[r][q], x = ox + q, y = oy + r;
+    if (ch === '.' || x < 0 || y < 0 || x >= W || y >= H) continue;
+    mask[y * W + x] = 1;
+    if (drawOn) put(x, y, GLOVE[ch]);
+  }
+}
+// water on the glove: a fast hand flings it off, and a wet one drips
+function handFx() {
+  if (!HAND.on) return;
+  const cx = HAND.x + (HAND.down ? 0 : 4), cy = HAND.y + (HAND.down ? 0 : 8);
+  const { vx, vy } = HAND, fast = vx * vx + vy * vy > 3600;
+  let hits = 0;
+  for (const s of streams) for (let i = 0; i < s.nd; i++) {
+    const dx = s.xs[i] - cx, dy = s.ys[i] - cy;
+    if (dx * dx > 100 || dy * dy > 121) continue;
+    hits += s.width[i];
+    if (fast && Math.random() < .12) drop(s.xs[i], s.ys[i], vx * .6 + (Math.random() - .5) * 50, vy * .6 - 30 - Math.random() * 70, .35 + Math.random() * .4, Math.random() < .3);
+  }
+  HAND.wet = Math.min(1, HAND.wet * .993 + hits * .003);
+  if (Math.random() < HAND.wet * .5) drop(cx + (Math.random() - .5) * 12, cy + 7 + Math.random() * 3, vx * .3 + (Math.random() - .5) * 6, Math.max(0, vy * .3) + 8, .4 + Math.random() * .4);
+}
+
+layer('temple', { update(t) {
+  direct(t);
+  mask.fill(0);
+  T = this.buf;
+  if (drawOn) { T.fill(0); beadIdx = 0; }
+
+  pose.d1 = BODY.d1.a;
+  raster(D1.x, D1.y, pose.d1, D1.r + 1, roseWindow(t, D1.r, 0, false));
+  // the gable's raking cornices and the towers' crowning cornices stand out from the front, so spray lands on them
+  for (const s of [-1, 1]) {
+    const k = s < 0 ? 'l' : 'r', ca = Math.cos(s * .693), sa = Math.sin(s * .693), slab = stoneRect(62, 2);
+    const crocketed = (u, v) => slab(u, v) || (v >= -5 && v < -2 && Math.abs(u) < 58 && mod(u + 62, 10) < 3 ? (v < -4 || mod(u + 62, 10) > 2.2 ? C.ink : C.white) : null);
+    still('gable' + k, CX + s * 48, 247, 66, (u, v) => crocketed(u * ca + v * sa, -u * sa + v * ca));
+    still('cornice' + k, s < 0 ? 42 : MX(42), 166, 44, stoneRect(42, 3));
+  }
+
+  raster(S0.x, S0.y, 0, S0.r, gemShape(S0.r, GEM_TOP, t));
+  still('canopy', LIP.x, LIP.y, 30, canopy);
+  drawFeatures();
+
+  for (const sd of SIDE) {
+    raster(sd.spring.x, sd.spring.y, 0, sd.spring.r, gemShape(sd.spring.r, GEM_SIDE, t));
+    const a = BODY.d2[sd.s < 0 ? 0 : 1].a;
+    raster(sd.d2.x, sd.d2.y, a, sd.d2.r + 1, roseWindow(t, sd.d2.r, sd.s < 0 ? 1 : 4));
+  }
+
+  drawMachines(t);
+  drawGuns();
+  drawCenser();
+  drawHand();
+} });
+
+// ---- water: traced streams that re-route every frame as the temple moves ----------
+// Every step, each spring's water is traced pixel-by-pixel through the collision mask:
+//   fall straight down → if blocked, slip diagonally → else run along the surface → spill off the end.
+// A stream that runs into another one merges and widens it downstream.
+// Water only exists where it has had time to flow: a stream is drawn as far as last step's water
+// (within a couple of pixels) plus one step of travel, so a new route grows at flow speed. Water
+// that gets cut off from its spring keeps going as a "ghost" that drains away at the same speed.
+// Particles (spray, shed droplets, ripples) ride on top.
+const DT = 1 / 60, G_ACC = 420;
+const owner = new Int32Array(W * H), ownerI = new Int32Array(W * H);
+const wmask = new Uint8Array(W * H); // water standing in the basin is a surface too
+const blockedW = (x, y) => x < 0 || x >= W || y >= H || (y >= 0 && (mask[y * W + x] === 1 || wmask[y * W + x] === 1));
+const PATS = Array.from({ length: 48 }, (_, seed) => {
+  const R = rng(seed * 13 + 7), pat = new Uint8Array(64);
+  for (let p = 0; p < 64;) {               // streak pattern: runs of shades with foam flecks
+    const len = 2 + Math.floor(R() * 6), c = R() < .12 ? 6 : R() < .35 ? 5 : 1 + Math.floor(R() * 4);
+    for (let k = 0; k < len && p < 64; k++) pat[p++] = c;
+  }
+  return pat;
+});
+
+let streams = [];
+const splits = []; // streams parted off where water lands on a flat or a peak, traced after their parents
+// a bump water can brim over: one pixel high, and the surface drops back down within a couple of pixels
+const bump = (x, y, d) => !blockedW(x + d, y - 1) && !blockedW(x, y - 1) && (!blockedW(x + 2 * d, y) || !blockedW(x + 3 * d, y));
+// the vessel (if any) whose cavity holds (x, y)
+function vesselAt(x, y) {
+  for (const V of vessels) {
+    const ca = Math.cos(V.ang), sa = Math.sin(V.ang), dx = x - V.x, dy = y - V.y;
+    const u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
+    if (Math.abs(u) < V.hw && v > -V.depth - 4 && v < 2) return V;
+  }
+  return null;
+}
+// water trapped in a hollow that isn't a vessel rises until it can step over one side of the rim
+function overflow(x, y, dir) {
+  if (vesselAt(x, y)) return null;                       // in a vessel it's just filling it
+  for (let h = 1; h <= 10 && !blockedW(x, y - h); h++)
+    for (const d of [dir, -dir]) if (!blockedW(x + d, y - h)) return [x + d, y - h, d];
+  return null;
+}
+function trace(x, y, w, dir, seed, from = null, jet = null) {
+  const id = streams.length;
+  const s = { id, seed, xs: [], ys: [], kind: [], dir: [], tau: [], width: [], run: [], impacts: [], end: 'stuck', merge: null, nd: 0, parent: from && from.slice(0, 2) };
+  streams.push(s);
+  let tau = from ? from[2] : 0, run = 0, falling = !from, moved = !!from, revisits = 0;
+  if (jet) { // shot from a nozzle: fly the arc (kind 2, passing through other water) until it hits something, then pour on from there
+    let [vx, vy] = jet, px = x, py = y;
+    dir = Math.sign(vx) || dir; moved = true;
+    for (let n = 0; n < 4000; n++) {
+      const st = .7 / Math.max(Math.abs(vx), Math.abs(vy), 1);
+      px += vx * st; vy += G_ACC * st; py += vy * st;
+      const nx = Math.round(px), ny = Math.round(py);
+      if (nx === x && ny === y) continue;
+      if (nx < 0 || nx >= W) { s.end = 'off'; return s; }
+      if (ny >= POOL) { s.end = 'pool'; return s; }
+      const sp = Math.hypot(vx, vy);
+      run = clamp((sp - 40) / 9, 0, 32);
+      if (blockedW(nx, ny)) { s.jhit = { i: s.xs.length, vx, vy }; break; }
+      s.xs.push(nx); s.ys.push(ny); s.tau.push(tau); s.width.push(w); s.run.push(run); s.kind.push(2); s.dir.push(dir);
+      tau += SPEED / sp * Math.hypot(nx - x, ny - y);
+      x = nx; y = ny;
+    }
+    if (s.xs.length) for (const a of [s.xs, s.ys, s.tau, s.width, s.run, s.kind, s.dir]) a.pop(); // poured on from the last pixel in flight
+    if (s.jhit) s.jhit.i = s.xs.length;
+  }
+  for (let step = 0; step < 3000; step++) {
+    if (y >= POOL) { s.end = 'pool'; break; }
+    if (y >= 0) {
+      const k = y * W + x, o = owner[k];
+      if (o === id && ++revisits > 3) {                 // circling in a hollow (a turnaround or two is fine)
+        const e = overflow(x, y, dir);                   // ...so it fills up and spills over the rim
+        if (!e) break;
+        [x, y, dir] = e; revisits = 0; tau += 1.3; continue;
+      }
+      if (o >= 0 && o !== id) {                          // join the other stream: it widens from here on
+        s.merge = [o, ownerI[k]]; s.end = 'merge'; break;
+      }
+      owner[k] = id; ownerI[k] = s.xs.length;
+    }
+    s.xs.push(x); s.ys.push(y); s.tau.push(tau); s.width.push(w); s.run.push(run);
+    s.kind.push(falling ? 0 : 1); s.dir.push(moved ? dir : 0);
+    if (!blockedW(x, y + 1)) {
+      if (!falling) run = 0;
+      falling = true; run++; y++;
+      tau += 1 / Math.min(4.5, 1 + run * .07);           // water accelerates as it falls
+    } else {
+      if (falling) {
+        s.impacts.push(s.xs.length - 1);
+        // landing: run downhill if one side is lower; on a flat (or a peak) the water parts both ways
+        const dl = !blockedW(x - 1, y + 1), dr = !blockedW(x + 1, y + 1), fl = !blockedW(x - 1, y), fr = !blockedW(x + 1, y);
+        if (dl !== dr) dir = dl ? -1 : 1;
+        else if (dl || (fl && fr)) {
+          if (w >= 2 && splits.length < 80) {
+            const h = w >> 1, cx = x - dir, cy = blockedW(cx, y + 1) ? y : y + 1;
+            w -= h;
+            splits.push([cx, cy, h, -dir, (seed + 17) % PATS.length, [id, s.xs.length - 1, tau]]);
+          }
+        } else if (fl !== fr) dir = fl ? -1 : 1;
+      }
+      falling = false; moved = true;
+      if (!blockedW(x + dir, y + 1)) { x += dir; y++; }
+      else if (!blockedW(x + dir, y)) x += dir;
+      else if (bump(x, y, dir)) { x += dir; y--; } // brim over a 1px bump (jaggies, dissolving stone) — but never creep up a slope
+      else if (!blockedW(x - dir, y)) { dir = -dir; x += dir; }
+      else if (bump(x, y, -dir)) { dir = -dir; x += dir; y--; }
+      else { const e = overflow(x, y, dir); if (!e) break; [x, y, dir] = e; } // a pit: fill it and spill over
+      tau += 1.3;
+    }
+  }
+  return s;
+}
+
+// vessels: the water's volume fills the cavity from the lowest pixels up, so the surface stays
+// level in world space at any tilt, and pours over any lip that ends up below it
+const rowN = new Int32Array(H);
+function fillVessel(V) {
+  const ca = Math.cos(V.ang), sa = Math.sin(V.ang), inner = V.inner ?? V.hw - 3.5, R = Math.ceil(Math.hypot(V.hw, V.depth)) + 1;
+  const cx = Math.round(V.x), cy = Math.round(V.y), ya = Math.max(0, cy - R), yb = Math.min(H - 1, cy + R);
+  const cav = [];
+  for (let y = ya; y <= yb; y++) {
+    rowN[y] = 0;
+    for (let x = Math.max(0, cx - R); x <= Math.min(W - 1, cx + R); x++) {
+      const dx = x - V.x, dy = y - V.y, u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
+      if (Math.abs(u) < inner && v < -.5 && v >= -V.depth && !mask[y * W + x]) { cav.push(y * W + x); rowN[y]++; }
+    }
+  }
+  V.cap = Math.max(1, cav.length);
+  V.vol = clamp(V.vol, 0, V.cap);
+  let need = V.vol, surf = yb + 1;
+  while (need > .5 && surf > ya) need -= rowN[--surf];
+  V.surf = surf;
+  V.pix.length = 0;
+  for (const k of cav) if (k >= surf * W) { wmask[k] = 1; V.pix.push(k); }
+  V.spill.length = 0;
+  if (V.vol < 1) return;
+  for (const side of [-1, 1]) {
+    const lip = V.lips ? V.lips[side < 0 ? 0 : 1] : V.depth; // how high this end's lip stands above the floor
+    const p = toScreen(V.x, V.y, V.ang, side * (V.hw - 1), -lip), out = toScreen(V.x, V.y, V.ang, side * (V.hw + 2), -lip - 1);
+    let excess = p[1] - surf;
+    if (V.vol >= V.cap * .97) excess = Math.max(excess, 1.5);
+    if (excess > .5) V.spill.push({ x: Math.round(out[0]), y: Math.round(out[1]), w: clamp(Math.round(excess * .7) + 1, 1, 9), dir: side * Math.sign(Math.cos(V.ang)) || side, excess });
+  }
+  if (V.leak || V.drain) { // a hole in the floor: a steady leak, or a drain that runs faster the fuller it is
+    const p = toScreen(V.x, V.y, V.ang, 0, 7), q = (V.leak || 0) + (V.drain || 0) * V.vol / V.qout;
+    V.spill.push({ x: Math.round(p[0]), y: Math.round(p[1]), w: q * V.qout > 15 ? 2 : 1, dir: 1, excess: q });
+    if (Math.random() < DT * .3 * Math.min(1, q * V.qout / 8)) sfx('bell', .5 + Math.random() * .5, V.x);
+  }
+}
+function vesselWater() { wmask.fill(0); for (const V of vessels) fillVessel(V); }
+// springs pour from both lower faces of their gems and surge unevenly, so the bodies below get shoved around
+const surge = (base, amp, f, ph) => t => base + amp * (Math.sin(t * f + ph) * .7 + Math.sin(t * f * 2.63 + ph * 1.7) * .3);
+// (positions are read live, since the hand can carry the springs off)
+const SOURCES = [
+  [() => [S0.x - 12, S0.y + 6], 5, -1, surge(4.5, 4, .37, 0)], [() => [S0.x + 12, S0.y + 6], 5, 1, surge(4.5, 4, .37, Math.PI)],
+  ...SIDE.flatMap(sd => [-1, 1].map(e => [() => [sd.spring.x + e * 8, sd.spring.y + 5], 3, e, surge(3, 2.5, .5 + sd.s * .06, sd.s + (e > 0 ? Math.PI : 0))])),
+  ...Array.from({ length: 20 }, (_, k) => { const dx = k < 10 ? -20 + k * 2 : 2 + (k - 10) * 2; return [() => [LIP.x + dx, LIP.y + LIP.hh + 1], 1, Math.sign(dx)]; }),
+];
+function traceAll() {
+  owner.fill(-1);
+  streams = [];
+  SOURCES.forEach(([at, w, d, pulse], k) => { const [x, y] = at(); trace(x, y, pulse ? Math.max(1, Math.round(pulse(simT))) : w, d, k); });
+  GUNS.forEach((g, k) => { // a gun that's only just opened sputters: a thin jet that droops short
+    if (g.power < .08 || g.show < 1) return;
+    const a = gunAng(g), [mx, my] = toScreen(g.x, g.y, a, GUN_LEN + 2, 0), sp = g.sp * g.power;
+    trace(Math.round(mx), Math.round(my), g.power > .6 ? g.w : g.power > .3 ? 2 : 1, Math.sign(Math.cos(a)), (k * 11 + 5) % PATS.length, null, [sp * Math.cos(a), sp * Math.sin(a)]);
+  });
+  CHERUBS.forEach((c, k) => { // poured from the urn's mouth once it's tipped far enough
+    if (c.pour < .5) return;
+    const a = urnAng(c), [ux, uy] = urnAt(c), [mx, my] = toScreen(ux, uy, a, 0, -11), sp = c.sp * c.pour;
+    trace(Math.round(mx), Math.round(my), c.pour > .85 ? 2 : 1, c.dir, (k * 7 + 3) % PATS.length, null, [Math.sin(a) * sp, -Math.cos(a) * sp]);
+  });
+  SWORDS.forEach((S, k) => { // shot out of the point along the blade
+    if (!S.shoot || S.V.vol < 1) return;
+    const V = S.V, s = S.d.s, [px, py] = toScreen(V.x, V.y, V.ang, s * (SWORD_HW + 2), -1);
+    trace(Math.round(px), Math.round(py), V.vol > 25 ? 3 : 2, s, (k * 17 + 7) % PATS.length, null, [s * Math.cos(SWORD_AIM) * SWORD_SP, -Math.sin(SWORD_AIM) * SWORD_SP - 30]); // along its aim, so the arc holds steady
+  });
+  CROWN.forEach((g, k) => { // spat in from the towers' tops, in spurts
+    if (g.power < .1) return;
+    trace(Math.round(g.x - g.s * CROWN_MOUTH[0]), g.y + CROWN_MOUTH[1], 2, -g.s, (k * 13 + 1) % PATS.length, null, [-g.s * CROWN_JET[0], -CROWN_JET[1]]);
+  });
+  SPOUTS.forEach((p, k) => { if (p.power >= .1) trace(p.x, p.y, p.power > .6 ? 2 : 1, Math.sign(p.vx), (k * 5 + 9) % PATS.length, null, [p.vx * p.power ** .5, p.vy * p.power ** .5]); });
+  vessels.forEach((V, j) => V.spill.forEach((sp, k) => trace(sp.x, sp.y, sp.w, sp.dir, (SOURCES.length + j * 2 + k) % PATS.length)));
+  for (let q = 0; q < splits.length; q++) trace(...splits[q]);
+  splits.length = 0;
+  settleFronts();
+  // settle the vessels: water that ended inside one raises its level, spilling lowers it
+  // (a stream that joins another inside a vessel before that one's water has got there pours in itself)
+  for (const s of streams) {
+    const n = s.xs.length;
+    if (!n || s.nd < n) continue;
+    let x = s.xs[n - 1], y = s.ys[n - 1];
+    if (s.end === 'merge') { const [o, j] = s.merge, t = streams[o]; if (t.nd > j) continue; x = t.xs[j]; y = t.ys[j]; }
+    else if (s.end !== 'stuck') continue;
+    const V = vesselAt(x, y);
+    if (V) V.vol += DT * s.width[n - 1] * V.qin;
+  }
+  // water cut loose upstream still drains into the vessel it was headed for (once per vessel, so a
+  // route flickering back and forth doesn't count the same water several times over)
+  const fed = new Map();
+  for (const gh of ghosts) {
+    const s = gh.s, n = s.xs.length;
+    if (s.end !== 'stuck' || gh.end < s.tau[n - 1]) continue;
+    const V = vesselAt(s.xs[n - 1], s.ys[n - 1]);
+    if (V) fed.set(V, Math.max(fed.get(V) || 0, s.width[n - 1]));
+  }
+  for (const [V, w] of fed) V.vol += DT * w * V.qin;
+  for (const V of vessels) for (const sp of V.spill) V.vol = Math.max(0, V.vol - DT * sp.excess * V.qout);
+}
+
+const SPEED = 50; // flow speed in path units / sec (path units shrink as falling water speeds up)
+const near = new Int32Array(W * H); // step stamp of water drawn within ~2px of each cell
+let stamp = 1, prevStreams = [];
+const ghosts = [], GHOSTS = 400;
+function stampNear(x, y) {
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -2; dx <= 2; dx++) {
+    const xx = x + dx, yy = y + dy;
+    if (xx >= 0 && xx < W && yy >= 0 && yy < H) near[yy * W + xx] = stamp;
+  }
+}
+const wasWet = (x, y) => y < 0 || near[y * W + x] >= stamp - 1;
+function settleFronts() {
+  stamp++;
+  const adv = SPEED * DT;
+  for (const s of streams) {
+    const n = s.xs.length;
+    // a parted-off stream has no water until its parent's water reaches the place it parted
+    if (s.parent && streams[s.parent[0]].nd <= s.parent[1]) { s.nd = 0; continue; }
+    let k = 0;                                         // already flowing here — allowing short gaps where the
+    for (let i = 0, gap = 0; i < n && gap <= 40; i++) {  // route wiggled past something moving
+      if (wasWet(s.xs[i], s.ys[i])) { k = i + 1; gap = 0; } else gap++;
+    }
+    const front = k < n ? s.tau[k] + adv : Infinity;   // ...then one step further
+    let nd = k;
+    while (nd < n && s.tau[nd] <= front) nd++;
+    s.nd = nd;
+    for (let i = 0; i < nd; i++) stampNear(s.xs[i], s.ys[i]);
+  }
+  // a merging stream only widens the other one once its water actually gets there
+  for (const s of streams) if (s.merge && s.xs.length && s.nd === s.xs.length) {
+    const [o, j] = s.merge, other = streams[o], w = s.width[s.width.length - 1];
+    for (let i = j; i < other.width.length; i++) other.width[i] = Math.min(11, other.width[i] + w);
+  }
+  // water from last step that is no longer fed: cut it loose to drain
+  for (const p of prevStreams) {
+    let i = 0;
+    while (i < p.nd && (near[p.ys[i] * W + p.xs[i]] === stamp || (i + 3 < p.nd && near[p.ys[i + 3] * W + p.xs[i + 3]] === stamp))) i++;
+    if (p.nd - i < 3) continue;
+    if (ghosts.length >= GHOSTS) { // full up: the one with the least water left goes, rather than this one
+      let m = 0;
+      for (let g = 1; g < ghosts.length; g++) if (ghosts[g].end - ghosts[g].head < ghosts[m].end - ghosts[m].head) m = g;
+      ghosts.splice(m, 1);
+    }
+    ghosts.push({ s: p, head: p.tau[i], end: p.tau[p.nd - 1] });
+  }
+  prevStreams = streams;
+  for (let g = ghosts.length - 1; g >= 0; g--) {
+    const gh = ghosts[g], last = gh.s.tau[gh.s.xs.length - 1];
+    gh.head += adv; gh.end = Math.min(last, gh.end + adv);
+    if (gh.head >= last) ghosts.splice(g, 1);
+  }
+}
+
+// particles on top: spray, shed droplets, ripples (purely visual)
+const SPRAYN = 6000;
+const sx = new Float32Array(SPRAYN), sy = new Float32Array(SPRAYN), svx = new Float32Array(SPRAYN), svy = new Float32Array(SPRAYN), slife = new Float32Array(SPRAYN), sbig = new Uint8Array(SPRAYN);
+const sfloor = new Float32Array(SPRAYN); // where each drop is gone: the lake, or the fountain's basin
+let sprayHead = 0;
+function drop(x, y, vx, vy, life, big = 0, floor = POOL) {
+  const j = sprayHead; sprayHead = (sprayHead + 1) % SPRAYN;
+  sx[j] = x; sy[j] = y; svx[j] = vx; svy[j] = vy; slife[j] = life; sbig[j] = big; sfloor[j] = floor;
+}
+const ripples = [];
+const fallSpeed = run => Math.min(330, 40 + run * 9);
+function emit() {
+  for (const s of streams) {
+    const n = s.xs.length;
+    if (!n) continue;
+    // splash where falling water hits a surface
+    for (const i of s.impacts) {
+      if (i >= s.nd) break;
+      const sp = fallSpeed(s.run[i]), w = s.width[i];
+      let k = w * sp / 900;
+      for (; k > 0; k--) if (Math.random() < k) drop(s.xs[i] + (Math.random() - .5) * w, s.ys[i] - 1, (Math.random() - .5) * sp * .7, -(.25 + Math.random() * .6) * sp * .55, .3 + Math.random() * .4, Math.random() < .2);
+    }
+    // where it meets the lake
+    if (s.end === 'pool' && s.nd === n) {
+      const i = n - 1, sp = fallSpeed(s.run[i]), w = s.width[i], d = s.dir[i], x0 = s.xs[i] + (d < 0 ? -(w >> 1) : d > 0 ? w >> 1 : 0);
+      for (let k = w * sp / 500; k > 0; k--) if (Math.random() < k) drop(x0 + (Math.random() - .5) * w, POOL - 1, (Math.random() - .5) * sp * .8, -(.3 + Math.random() * .7) * sp * .5, .35 + Math.random() * .5, Math.random() < .25);
+      if (Math.random() < .02 * w && ripples.length < 80) ripples.push({ x: x0, age: 0, w: w * .7 + 2 });
+    }
+    // droplets peeling off the edges of falling sheets
+    if (Math.random() < .5) {
+      const i = Math.floor(Math.random() * s.nd);
+      if (s.nd && s.kind[i] === 0 && s.run[i] > 6) {
+        const w = s.width[i], side = Math.random() < .5 ? -1 : 1;
+        drop(s.xs[i] + side * (w >> 1) + side, s.ys[i], side * (8 + Math.random() * 20), fallSpeed(s.run[i]) * .8, .4 + Math.random() * .5);
+      } else if (s.nd && s.kind[i] === 2) { // mist trailing off a jet, flying on the way it was going
+        const j = Math.min(i + 1, s.nd - 1);
+        drop(s.xs[i], s.ys[i], (s.xs[j] - s.xs[i]) * 140 + (Math.random() - .5) * 40, (s.ys[j] - s.ys[i]) * 140 + (Math.random() - .5) * 40, .25 + Math.random() * .35);
+      }
+    }
+  }
+  for (let j = 0; j < SPRAYN; j++) if (slife[j] > 0) { svy[j] += G_ACC * .7 * DT; sx[j] += svx[j] * DT; sy[j] += svy[j] * DT; slife[j] -= DT; if (sy[j] >= sfloor[j] && svy[j] > 0) slife[j] = 0; }
+  for (let k = ripples.length - 1; k >= 0; k--) if ((ripples[k].age += DT) > 1.2) ripples.splice(k, 1);
+}
+// ---- crown bursts: at the finale the crown spring throws spray up into the sky (purely visual) ----
+const BURST = { u: 0 };
+function fountainFx() {
+  const u = SHOW.u, was = BURST.u; BURST.u = u;
+  for (const b of [15.2, 15.8, 16.4]) if (was < b && u >= b) for (let k = 0; k < 120; k++) {
+    const a = -Math.PI / 2 + (Math.random() - .5) * 2.6, v = 140 + Math.random() * 180;
+    drop(S0.x, S0.y - S0.r, Math.cos(a) * v, Math.sin(a) * v, 2.8, 1);
+  }
+  // the shell over the angel's head bubbles up, spitting little drops off its surface
+  if (SHELL.vol > SHELL.cap * .5) for (let k = 0; k < 2; k++) if (Math.random() < .6)
+    drop(SHELL.x + (Math.random() - .5) * 12, SHELL.surf - 2, (Math.random() - .5) * 50, -40 - Math.random() * 80, .3 + Math.random() * .5, Math.random() < .5);
+  for (const S of SWORDS) { // a sword starting to shoot throws a spray off its point
+    if (S.shoot && !S.shot) {
+      const V = S.V, s = S.d.s, [px, py] = toScreen(V.x, V.y, V.ang, s * (SWORD_HW + 2), -1);
+      for (let k = 0; k < 30; k++) { const a = Math.atan2(Math.sin(V.ang) * s - .13, Math.cos(V.ang) * s) + (Math.random() - .5) * .7, v = 80 + Math.random() * 150; drop(px, py, Math.cos(a) * v, Math.sin(a) * v, .5 + Math.random() * .5, Math.random() < .5); }
+    }
+    S.shot = S.shoot;
+  }
+  // each bark of a crown gargoyle throws a spray out ahead of its jet
+  for (const g of CROWN) {
+    const mx = g.x - g.s * CROWN_MOUTH[0], my = g.y + CROWN_MOUTH[1];
+    if (g.power > .5 && !(g.was > .5)) for (let k = 0; k < 40; k++) {
+      const a = Math.atan2(-CROWN_JET[1], -g.s * CROWN_JET[0]) + (Math.random() - .5) * .9, v = 70 + Math.random() * 130;
+      drop(mx, my, Math.cos(a) * v, Math.sin(a) * v, .6 + Math.random() * .6, Math.random() < .6);
+    }
+    else if (g.power > .2) drop(mx, my, -g.s * (30 + Math.random() * 50), -40 - Math.random() * 60, .4 + Math.random() * .3);
+    g.was = g.power;
+  }
+}
+function simStep() { vesselWater(); traceAll(); stepBodies(); handFx(); fountainFx(); emit(); }
+
+// pulses of neon riding down the streams with the water: each one a band of a single color,
+// fixed to a spot in the flow (v) so it travels at the water's speed, and the whole lot breathing slowly
+function neon(c, v, seed, t) {
+  const p = v * .045 + seed * .61, k = Math.sin(p * Math.PI * 2);
+  if (k <= 0) return c;
+  return lerpC(c, NEON[mod(Math.floor(p) + seed, NEON.length)], k * k * (.45 + .15 * Math.sin(t * 2.3 + seed)));
+}
+const COLOFF = PATS.map((_, seed) => Array.from({ length: 12 }, (_, o) => Math.floor(h2(o, seed * 5) * 64)));
+function drawStream(s, t, i0, i1, ghost) {
+  const n = s.xs.length, pat = PATS[s.seed], off = COLOFF[s.seed];
+  const tip = !ghost && i1 < n ? i1 - 3 : Infinity; // foamy leading edge of water still advancing
+  for (let i = i0; i < i1; i++) {
+    const x = s.xs[i], y = s.ys[i], w = s.width[i], v = s.tau[i] - t * SPEED;
+    if (ghost && (mask[y * W + x] || near[y * W + x] === stamp)) continue;
+    if (ghost && s.kind[i] === 1 && !blockedW(x, y + 1)) continue; // the surface it was running on has moved away
+    if (i >= tip || (ghost && i < i0 + 2)) { for (let o = -(w >> 1); o <= (w >> 1); o++) mix(x + o, y, C.foam, ghost ? .5 : .85); continue; }
+    if (s.kind[i] === 0) {
+      // falling sheet: horizontal span, extending away from the lip it left
+      // (cut off where it meets something solid, so a wide sheet passing beside a bucket doesn't paint over it)
+      const d = s.dir[i], x0 = d < 0 ? x - w + 1 : d > 0 ? x : x - (w >> 1), row = y * W;
+      let lo = x, hi = x;
+      if (y >= 0) {
+        while (lo > Math.max(0, x0) && !mask[row + lo - 1]) lo--;
+        while (hi < Math.min(W - 1, x0 + w - 1) && !mask[row + hi + 1]) hi++;
+      } else { lo = x0; hi = x0 + w - 1; }
+      const lip = i > 0 && s.kind[i - 1] === 1;
+      for (let px = lo; px <= hi; px++) {
+        const o = px - x0, c = lip ? C.foam : neon(WATER[pat[mod(Math.floor(v * .8) + off[o], 64)]], v, s.seed, t);
+        mix(px, y, c, (px === lo || px === hi) && hi - lo > 1 ? .6 : .94);
+      }
+    } else if (s.kind[i] === 2) {
+      // a jet in flight: a round slug of water, brighter on top
+      const r = w >> 1, c = neon(WATER[pat[mod(Math.floor(v * .8), 64)]], v, s.seed, t);
+      for (let oy = -r; oy <= r; oy++) for (let ox = -r; ox <= r; ox++) if (ox * ox + oy * oy <= r * r) mix(x + ox, y + oy, oy < 0 ? WATER[5] : c, .92);
+    } else {
+      // running water: a sheet riding on top of a ledge, or hugging the outside of a slope
+      const slope = i > 0 && s.ys[i - 1] !== y, d = s.dir[i] || 1;
+      const th = slope ? 2 + Math.min(2, w >> 1) : 1 + Math.min(2, w >> 2);
+      for (let k = 0; k < th; k++) {
+        const ci = pat[mod(Math.floor(v) + k * 17, 64)];
+        const c = k === th - 1 ? lerpC(WATER[ci], C.foam, .35) : neon(WATER[ci], v, s.seed, t), a = k === th - 1 ? .75 : .95;
+        if (slope) { mix(x + d * k, y, c, a); mix(x + d * k, y - 1, c, a * .8); }
+        else mix(x, y - k, c, a);
+      }
+    }
+  }
+  // churning foam where it lands
+  if (ghost) return;
+  for (const i of s.impacts) {
+    if (i >= i1) break;
+    const w = s.width[i];
+    for (let k = 0; k < w + 3; k++) {
+      const fx = s.xs[i] - ((w + 3) >> 1) + k, fy = s.ys[i] - (k & 1);
+      if (h2(k + s.seed * 31, Math.floor(t * 12) + i) < .6 && !(fx >= 0 && fx < W && fy >= 0 && mask[fy * W + fx])) mix(fx, fy, C.foam, .8);
+    }
+  }
+}
+layer('water', { draw(t) {
+  // water standing in the vessels, surface kept level in world space
+  for (const V of vessels) for (const k of V.pix) {
+    const x = k % W, y = (k / W) | 0, depth = y - V.surf;
+    const c = depth === 0 ? (h2(x, Math.floor(t * 6)) < .3 ? C.foam : WATER[5]) : depth < 3 ? WATER[3] : h2(x >> 1, y + Math.floor(t * 3)) < .08 ? WATER[4] : WATER[1 + ((x + y) & 1)];
+    mix(x, y, c, .92);
+  }
+  // the shell's water bubbling up in the middle: a churning mound of foam over its surface
+  if (SHELL.vol > SHELL.cap * .5) for (let dx = -7; dx <= 7; dx++) {
+    const h = Math.round((1 - (dx / 8) ** 2) * (2 + 1.2 * Math.sin(t * 9 + dx * 1.3) + Math.sin(t * 5.3 - dx * .7)));
+    for (let k = 1; k <= h; k++) mix(SHELL.x + dx, SHELL.surf - k, k === h || h2(dx + 40, Math.floor(t * 14) + k) < .3 ? C.foam : WATER[4], .9);
+  }
+  for (const gh of ghosts) {
+    const s = gh.s;
+    let i0 = 0; while (i0 < s.xs.length && s.tau[i0] < gh.head) i0++;
+    let i1 = i0; while (i1 < s.xs.length && s.tau[i1] <= gh.end) i1++;
+    drawStream(s, t, i0, i1, true);
+  }
+  for (const s of streams) drawStream(s, t, 0, s.nd, false);
+} });
+
+// ---- holy light: shafts slanting down over the front, a beam on the angel, a glory behind the crown at
+// the finale, glitter drifting down through it all, and star flares popping off the gold ----
+const SHAFTS = [-40, 70, 170, 250, 360].map((x, k) => ({ x, w: [30, 22, 42, 26, 34][k], ph: k * 1.7 })); // where each crosses the middle row
+const SLANT = .3; // shafts lean this far right per row down
+const GLITTER = Array.from({ length: 320 }, (_, k) => { const R = rng(1300 + k); return { x: R() * W, y: R() * H, vy: 8 + R() * 18, sw: 1 + R() * 5, f: 1 + R() * 2.5, ph: R() * 7, c: R() < .6 ? C.goldLt : C.white }; });
+const warm = hex('#ffeaa0');
+function flare(x, y, k, len) { // a four-point star with fainter diagonals
+  x = Math.round(x); y = Math.round(y);
+  mix(x, y, C.white, k);
+  for (let r = 1; r <= len; r++) {
+    const a = k * (1 - r / (len + 1));
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) mix(x + dx * r, y + dy * r, r < 2 ? C.white : C.goldLt, a);
+    if (r <= len >> 1) for (const [dx, dy] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) mix(x + dx * r, y + dy * r, C.goldLt, a * .6);
+  }
+}
+const FLARES = () => [[S0.x, S0.y - 14], [LIP.x, LIP.y - 16], ...SIDE.map(sd => [sd.spring.x, sd.spring.y - 9]), [D1.x - 44, D1.y - 40], [D1.x + 52, D1.y + 28],
+  [CX, ANGEL.y - 104], [CX - 52, BOWL.y - 11], [CX + 92, BASIN.y - 14], ...CHERUBS.map(c => [c.x + c.dir * 8, c.y - 21]), ...DEMONS.map(d => [d.x, d.y + 1]), censerAt(), ...GUNS.filter(g => g.kind === 'angel' && g.show > .5).map(g => toScreen(g.x, g.y, gunAng(g), GUN_LEN, 0))];
+layer('holy light', { draw(t) {
+  const y1 = Math.min(vy1, POOL);
+  for (let y = vy0; y < y1; y++) { // shafts, breathing slowly and fading toward the lake
+    const fall = .45 + .55 * (1 - y / POOL), grow = .6 + .4 * y / H;
+    for (const s of SHAFTS) {
+      const cx = s.x + (y - H / 2) * SLANT, w = s.w * grow, b = .24 * fall * (.55 + .45 * Math.sin(t * .5 + s.ph));
+      for (let x = Math.max(0, Math.ceil(cx - w)); x <= Math.min(W - 1, cx + w); x++) { const e = 1 - Math.abs(x - cx) / w; mix(x, y, warm, b * e * e); }
+    }
+  }
+  // the beam on the angel, and the glow round her halo
+  const hb = .35 + .65 * SHOW.halo, hx = ANGEL.x, hy = ANGEL.y - 87;
+  for (let y = Math.max(vy0, ANGEL.y - 420); y < Math.min(y1, ANGEL.y + 30); y++) {
+    const w = 16 + (y - (ANGEL.y - 420)) * .06, a = .16 * hb * Math.min(1, (y - (ANGEL.y - 420)) / 120);
+    for (let x = Math.ceil(hx - w); x <= hx + w; x++) { const e = 1 - Math.abs(x - hx) / w; mix(x, y, C.white, a * e); }
+  }
+  if (hy > vy0 - 50 && hy < vy1 + 50) for (let y = hy - 46; y <= hy + 46; y++) for (let x = hx - 46; x <= hx + 46; x++) {
+    const d = Math.hypot(x - hx, y - hy) / 46;
+    if (d < 1) mix(x, y, C.goldLt, .4 * hb * (1 - d) ** 2);
+  }
+  // the glory: a sunburst behind the crown at the finale
+  if (SHOW.glory > 0 && S0.y < vy1 + 140) for (let y = Math.max(vy0, S0.y - 140); y < Math.min(y1, S0.y + 140); y++) for (let x = 0; x < W; x++) {
+    const dx = x - S0.x, dy = y - S0.y, d = Math.hypot(dx, dy) / 140;
+    if (d >= 1) continue;
+    const ray = Math.cos(Math.atan2(dy, dx) * 12 + t * .8) > .55 ? 1 : .35;
+    mix(x, y, ray > .5 ? C.goldLt : C.white, SHOW.glory * .6 * ray * (1 - d) ** 1.5);
+  }
+  // glitter drifting down, twinkling
+  for (const g of GLITTER) {
+    const y = mod(g.y + t * g.vy, H), x = g.x + Math.sin(t * .7 + g.ph) * g.sw;
+    if (y < vy0 || y >= y1) continue;
+    const b = .5 + .5 * Math.sin(t * g.f * 3 + g.ph);
+    if (b > .85) flare(x, y, (b - .85) / .15, 2); else mix(x, y, g.c, .25 + .5 * b);
+  }
+  // star flares popping off the gold, one after another
+  FLARES().forEach(([x, y], i) => {
+    const ph = mod(t * .45 + i * .37, 1);
+    if (ph < .14 && y > vy0 - 8 && y < vy1 + 8) flare(x, y, Math.sin(ph / .14 * Math.PI), 6);
+  });
+} });
+
+// ---- lake: mirrors everything composited above it ----
+const lakeDark = hex('#3fb8e0');
+layer('lake', { post(t) {
+  for (let y = Math.max(POOL, vy0); y < Math.min(H, vy1); y++) {
+    const k = y - POOL, src = POOL - 1 - k, off = Math.round(Math.sin(y * .7 + t * 2) * (1 + k * .06));
+    for (let x = 0; x < W; x++) {
+      const sx = clamp(x + off, 0, W - 1), si = (src * W + sx) << 2, i = (y * W + x) << 2;
+      O[i] = O[si] * .55 + lakeDark[0] * .45; O[i + 1] = O[si + 1] * .55 + lakeDark[1] * .45; O[i + 2] = O[si + 2] * .55 + lakeDark[2] * .45;
+      if (h2(x >> 1, y * 13 + Math.floor(t * 5)) > .985) { O[i] = O[i] * .4 + 150; O[i + 1] = O[i + 1] * .4 + 155; O[i + 2] = O[i + 2] * .4 + 160; }
+    }
+  }
+  if (POOL >= vy0 && POOL < vy1) for (let x = 0; x < W; x++) { const i = (POOL * W + x) << 2; O[i] = O[i] * .5 + 125; O[i + 1] = O[i + 1] * .5 + 128; O[i + 2] = O[i + 2] * .5 + 128; }
+} });
+
+// ---- spray & mist ----
+const MISTL = 720, mistTex = new Float32Array(MISTL * 32);
+for (let y = 0; y < 32; y++) for (let x = 0; x < MISTL; x++) {
+  const k = x / MISTL; // cross-fade so the strip wraps without a seam
+  mistTex[y * MISTL + x] = .2 * Math.sin(Math.PI * y / 32) * (fbm(x * .04, (y + 372) * .15) * (1 - k) + fbm((x - MISTL) * .04, (y + 372) * .15) * k);
+}
+layer('spray', { draw(t) {
+  const off = Math.floor(t * 6);
+  for (let y = 0; y < 32; y++) for (let x = 0; x < W; x++) mix(x, y + POOL - 32, C.mist, mistTex[y * MISTL + mod(x + off, MISTL)]);
+  for (let j = 0; j < SPRAYN; j++) if (slife[j] > 0) {
+    const a = Math.min(1, slife[j] * 2.5) * .9;
+    mix(sx[j], sy[j], WATER[4], a);
+    if (sbig[j]) { mix(sx[j] + 1, sy[j], WATER[3], a * .6); mix(sx[j], sy[j] - 1, WATER[3], a * .6); }
+  }
+  for (const r of ripples) {
+    const k = r.age / 1.2, rad = r.w + k * 16, a = (1 - k) * .5;
+    for (let ang = 0; ang < Math.PI * 2; ang += .09) mix(r.x + Math.cos(ang) * rad, POOL + 2 + Math.sin(ang) * rad * .25, C.white, a);
+  }
+} });
+
+// ============================================================
+// COMPOSITOR + FIXED-STEP SIMULATION
+// ============================================================
+function blend(S) {
+  for (let i = vy0 * W * 4, e = vy1 * W * 4; i < e; i += 4) {
+    const a = S[i + 3];
+    if (a === 0) continue;
+    if (a === 255) { O[i] = S[i]; O[i + 1] = S[i + 1]; O[i + 2] = S[i + 2]; continue; }
+    const k = a / 255;
+    O[i] += (S[i] - O[i]) * k; O[i + 1] += (S[i + 1] - O[i + 1]) * k; O[i + 2] += (S[i + 2] - O[i + 2]) * k;
+  }
+}
+const temple = layers.find(L => L.name === 'temple');
+let simT = 0, camY = 0;
+function advance(t) {
+  // world moves in fixed 1/60s steps so the water behaves the same at any frame rate
+  const n = Math.min(3, Math.floor((t - simT) / DT));
+  for (let k = 0; k < n; k++) { simT += DT; drawOn = k === n - 1; moveHand(); temple.update(simT); simStep(); }
+  drawOn = true;
+  if (simT + DT <= t) simT = t; // fell behind (tab was hidden): skip ahead
+}
+function frame(t) {
+  advance(t);
+  // the camera: where the show has it, or held at ?cam= (0 is the top), or the whole front with ?view=full
+  camY = FULL ? 0 : params.has('cam') ? clamp(+params.get('cam'), 0, H - VIEW) : Math.round((1 - SHOW.cam) * (H - VIEW));
+  vy0 = camY; vy1 = FULL ? H : camY + VIEW;
+  for (let i = vy0 * W * 4, e = vy1 * W * 4; i < e; i += 4) { O[i] = 223; O[i + 1] = 244; O[i + 2] = 255; O[i + 3] = 255; }
+  for (const L of layers) {
+    if (!L.on) continue;
+    if (L.post) { L.post(t); continue; }
+    if (!L.static && !L.update) { T = L.buf; T.fill(0); L.draw(t); }
+    blend(L.buf);
+  }
+  ctx.putImageData(img, 0, -camY, 0, camY, W, vy1 - vy0);
+}
+
+// ============================================================
+// SOUND — the sōzu's hollow knock, the pipe's tok against its stop, and the suikinkutsu:
+// drips falling into a buried jar ring like small bells. Everything is synthesized, so the
+// same voices can be rendered offline into a soundtrack for a recording.
+// ============================================================
+const SOUND = { on: false, ctx: null, out: null, log: null };
+const IN_SCALE = [0, 1, 5, 7, 8].map(k => 2 ** (k / 12)); // miyako-bushi / in scale
+function sfx(type, vel = 1, x = CX, note) {
+  const e = { t: simT, type, vel, x, note: note ?? Math.floor(Math.random() * 10) };
+  if (SOUND.log) SOUND.log.push(e);
+  else if (SOUND.on && SOUND.ctx) voice(SOUND.ctx, SOUND.out, SOUND.ctx.currentTime + .02, e);
+}
+function soundGraph(ctx) {
+  const master = ctx.createGain(); master.gain.value = 1.6; master.connect(ctx.destination);
+  const verb = ctx.createConvolver(), ir = ctx.createBuffer(2, ctx.sampleRate * 2.8, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / ctx.sampleRate * 2.2); }
+  verb.buffer = ir;
+  const wet = ctx.createGain(); wet.gain.value = .35; verb.connect(wet).connect(master);
+  const dry = ctx.createGain(); dry.connect(master); dry.connect(verb);
+  // the bed: the falls themselves, as soft filtered noise
+  const nb = ctx.createBuffer(2, ctx.sampleRate * 4, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = nb.getChannelData(c); let b = 0; for (let i = 0; i < d.length; i++) { b = b * .97 + (Math.random() * 2 - 1) * .03; d[i] = b * 4 + (Math.random() * 2 - 1) * .15; } }
+  const src = ctx.createBufferSource(); src.buffer = nb; src.loop = true;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1400;
+  const g = ctx.createGain(); g.gain.value = .07;
+  src.connect(lp).connect(g).connect(master); src.start();
+  return dry;
+}
+function voice(ctx, out, when, e) {
+  const pan = ctx.createStereoPanner(); pan.pan.value = clamp((e.x - CX) / CX, -1, 1) * .7; pan.connect(out);
+  const tone = (f, a, dec, f1 = f) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.setValueAtTime(f, when); o.frequency.exponentialRampToValueAtTime(f1, when + dec);
+    g.gain.setValueAtTime(0, when); g.gain.linearRampToValueAtTime(a, when + .003); g.gain.exponentialRampToValueAtTime(1e-4, when + dec);
+    o.connect(g).connect(pan); o.start(when); o.stop(when + dec + .05);
+  };
+  const click = (f, a, dec) => {
+    const b = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * dec), ctx.sampleRate), d = b.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) ** 3;
+    const s = ctx.createBufferSource(), bp = ctx.createBiquadFilter(), g = ctx.createGain();
+    s.buffer = b; bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = 2; g.gain.value = a;
+    s.connect(bp).connect(g).connect(pan); s.start(when);
+  };
+  const v = e.vel;
+  if (e.type === 'knock') {        // kon: hollow bamboo on stone
+    tone(540, .5 * v, .22, 470); tone(1290, .22 * v, .09); tone(2210, .08 * v, .05); click(2600, .5 * v, .025);
+  } else if (e.type === 'tok') {   // the pipe's end landing on its stop
+    tone(330, .4 * v, .16, 300); tone(860, .14 * v, .07); click(1800, .3 * v, .02);
+  } else if (e.type === 'bell') {  // a drip in the buried jar
+    const f = 880 * IN_SCALE[e.note % 5] * (e.note >= 5 ? 2 : 1);
+    tone(f, .16 * v, 2.4); tone(f * 2.76, .05 * v, .9); tone(f * 5.4, .025 * v, .35);
+  }
+}
+// for recordings: render the logged events into a WAV (returned as base64)
+async function renderSoundtrack(events, t0, dur) {
+  const sr = 44100, ctx = new OfflineAudioContext(2, Math.ceil(dur * sr), sr), out = soundGraph(ctx);
+  for (const e of events) if (e.t >= t0 && e.t < t0 + dur) voice(ctx, out, e.t - t0, e);
+  const buf = await ctx.startRendering(), L = buf.getChannelData(0), R = buf.getChannelData(1), n = L.length;
+  const wav = new DataView(new ArrayBuffer(44 + n * 4)), str = (o, s) => [...s].forEach((c, i) => wav.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF'); wav.setUint32(4, 36 + n * 4, true); str(8, 'WAVEfmt '); wav.setUint32(16, 16, true); wav.setUint16(20, 1, true); wav.setUint16(22, 2, true);
+  wav.setUint32(24, sr, true); wav.setUint32(28, sr * 4, true); wav.setUint16(32, 4, true); wav.setUint16(34, 16, true); str(36, 'data'); wav.setUint32(40, n * 4, true);
+  for (let i = 0; i < n; i++) { wav.setInt16(44 + i * 4, clamp(L[i], -1, 1) * 32767, true); wav.setInt16(46 + i * 4, clamp(R[i], -1, 1) * 32767, true); }
+  const bytes = new Uint8Array(wav.buffer); let bin = '';
+  for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  return btoa(bin);
+}
+
+// ============================================================
+// THE SHOW — a 28s loop for the reel: it opens on the fountain, keeps bringing something new in as the
+// camera climbs the front to the crown, then the crown shuts off and the camera sinks back down as slowly as it
+// rose, the machines below still running until it reaches them.
+//    always: shafts of light breathing over the front, glitter falling, star flares off the gold
+//    1s gold light sweeps the marble
+//    1.5s the lower cherubs tip their urns     2.5s the angel's halo flares and her beam brightens
+//    2.6s gargoyles by the lake appear, fire at 3.6 / 4.4 into the basin, later ducking to splash down
+//    3.2s jets rise out of the basin
+//    4.2s the cherubs on the clouds pour     5.5s the inner jets     4.5–14s the camera climbs to the top
+//    6–7.5s the censer swings wider across the curtain     7.5s the demons' eyes light up
+//    9.5s herald angels appear either side of the rose, trumpet at 10.5 / 11.3 on it
+//    11s the angels sweep, rocking the rose      12.5s the rose's glass lights up
+//    12.6s the gargoyles on the towers' tops start barking water in sprays up over the gable
+//    14.4s a glory of light opens behind the crown     14.8s finale: gold sweep, bursts of spray at 15.2 / 15.8 / 16.4
+//    16.4–17.6 the crown shuts off (the heralds, the glass, the glory, the barking gargoyles)
+//    16.8–26.3 the camera sinks back down     24–26.6 everything below winds down as it gets there
+// ============================================================
+const LOOP = 28, T0 = 8; // T0: the world pre-runs this long before the show starts
+const ramp = (u, a0, a1, b0, b1) => clamp(Math.min((u - a0) / (a1 - a0), (b1 - u) / (b1 - b0)), 0, 1); // 0 → 1 over a0..a1, 1 → 0 over b0..b1
+const ease = k => k * k * (3 - 2 * k);
+const SHOW = { u: 0, glint: -1, halo: 0, evil: 0, glass: 0, glory: 0, cam: 0 };
+function direct(t) {
+  const u = SHOW.u = mod(t - T0, LOOP);
+  SHOW.cam = u < 4.5 ? 0 : u < 14 ? ease((u - 4.5) / 9.5) : u < 16.8 ? 1 : u < 26.3 ? 1 - ease((u - 16.8) / 9.5) : 0; // up and down alike
+  SHOW.glint = u > 1 && u < 2 ? (u - 1) * 1400 - 40 : u > 14.8 && u < 15.8 ? (u - 14.8) * 1400 - 40 : -1;
+  SHOW.halo = ramp(u, 2.5, 3, 5, 6);
+  SHOW.evil = ramp(u, 7.5, 8.2, 24.4, 25.4) * (.75 + .25 * Math.sin(u * 5));
+  SHOW.glass = ramp(u, 12.5, 13.2, 16.4, 17.4);
+  SHOW.glory = ramp(u, 14.4, 15.2, 16.6, 17.6);
+  for (const c of CHERUBS) {
+    c.pour = ramp(u, c.hi ? 4.2 : 1.5, c.hi ? 4.9 : 2.2, 25.2, 26);
+    c.tilt = .3 + 1.6 * c.pour + .12 * c.pour * Math.sin(u * 2.2 + c.x);
+  }
+  SPOUTS.forEach((p, k) => p.power = ramp(u, k < 2 ? 3.2 : 5.5, k < 2 ? 3.8 : 6.1, 25.2, 26));
+  for (const g of GUNS) {
+    const late = g.s > 0 ? .8 : 0, at = g.at, off = g.kind === 'angel' ? 0 : 8.6; // the heralds stop with the crown, the gargoyles by the lake once the camera's back down
+    g.show = ramp(u, at + late, at + late + .8, 17 + off, 17.8 + off);
+    g.power = ramp(u, at + late + 1, at + late + 1.6, 16.4 + off, 17 + off);
+    const sweep = ramp(u, at + 1.5, at + 2.5, 15.5 + off, 16.5 + off) * (g.kind === 'angel' ? .32 : .3);
+    g.a = g.aim + sweep * Math.sin((u - at) * 2.1 + (g.s > 0 ? Math.PI : 0)); // each pair sweeps against itself, so what they hit rocks
+    if (g.kind === 'gargoyle') { // every few seconds a gargoyle ducks its head and dumps its water straight down
+      const d = mod(u + (g.s > 0 ? 1.4 : 0) + g.y * .01, 4.2), dip = d > 2.8 ? Math.sin((d - 2.8) / 1.4 * Math.PI) : 0;
+      g.a = lerp(g.a, 1.05, dip * ramp(u, at + 2, at + 2.5, 15.8 + off, 16.4 + off));
+    }
+  }
+  CENSER.pump = .05 + .14 * ramp(u, 6, 7.5, 24, 25.2);
+  for (const g of CROWN) { // they bark: a short hard burst about every 1.2s, the right one half a beat behind. A bark is
+    // on or off at one speed, so its water flies one arc and carries on along it once the bark stops
+    const late = g.s > 0 ? .4 : 0, beat = mod(u / 1.2 + (g.s > 0 ? .5 : 0), 1);
+    g.power = u > 12.6 + late && u < 16.6 && beat < .35 ? 1 : 0;
+  }
+  // the swords are held point up while they fill; once one brims over (or has stood a while with some in it)
+  // it's levelled at the middle and the water shoots out of the point (see traceAll) until it's spent
+  for (const S of SWORDS) {
+    const V = S.V;
+    S.wait += DT;
+    if (!S.pour && S.wait > 2 && ((V.spill.length && V.vol > 10) || (S.wait > 8 && V.vol > 15))) S.pour = true;
+    else if (S.pour && V.vol < 3) { S.pour = false; S.wait = 0; }
+    S.th += ((S.pour ? SWORD_AIM : .3 + .04 * Math.sin(u * 1.1 + S.d.s)) - S.th) * (1 - Math.exp(-DT * (S.pour ? 6 : 1.2)));
+    S.shoot = S.pour && Math.abs(S.th - SWORD_AIM) < .06;
+    if (S.shoot) V.vol = Math.max(0, V.vol - DT * SWORD_RATE);
+  }
+  placeSwords();
+}
+
+const params = new URLSearchParams(location.search);
+if (params.has('only')) { const want = params.get('only').split(','); layers.forEach(L => L.on = want.includes(L.name)); }
+
+// pre-run the world a few seconds so the water is already flowing on load; ?at=15 starts 15s into the show
+let clock = +(params.get('t') || T0 + +(params.get('at') || 0));
+simT = Math.max(0, clock - T0);
+drawOn = false;
+while (simT + DT <= clock) { simT += DT; temple.update(simT); simStep(); }
+drawOn = true; temple.update(simT);
+
+let paused = false, last = performance.now();
+function loop(now) {
+  if (!paused) clock += Math.min(.1, (now - last) / 1000);
+  last = now;
+  if (!paused) frame(clock);
+  requestAnimationFrame(loop);
+}
+const toggle = () => { paused = !paused; };
+const toCanvas = e => { const r = canvas.getBoundingClientRect(); return [clamp(Math.round((e.clientX - r.left) / r.width * W), 0, W - 1), clamp(Math.round((e.clientY - r.top) / r.height * canvas.height) + camY, 0, H - 1)]; };
+canvas.addEventListener('pointermove', e => {
+  if (!e.isPrimary) return;
+  [HAND.tx, HAND.ty] = toCanvas(e);
+  if (!HAND.on) { HAND.on = true; HAND.x = HAND.tx; HAND.y = HAND.ty; HAND.vx = HAND.vy = 0; }
+});
+canvas.addEventListener('pointerleave', () => { if (!HAND.down) HAND.on = false; });
+canvas.addEventListener('pointerdown', e => { if (!e.isPrimary) return; canvas.setPointerCapture(e.pointerId); [HAND.tx, HAND.ty] = toCanvas(e); press(); });
+// a finger has no hover, so the hand goes away when it lifts
+const lift = e => { if (!e.isPrimary) return; release(); if (e.pointerType !== 'mouse') HAND.on = false; };
+canvas.addEventListener('pointerup', lift);
+canvas.addEventListener('pointercancel', lift);
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); toggle(); }
+});
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
