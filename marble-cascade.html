@@ -1844,14 +1844,14 @@ async function renderSoundtrack(events, t0, dur) {
 }
 
 // ============================================================
-// THE SHOW — a 28s loop for the reel: it opens on the fountain, keeps bringing something new in as the
+// THE SHOW — a 27s loop for the reel: it opens on the fountain, keeps bringing something new in as the
 // camera climbs the front to the crown, then the crown shuts off and the camera sinks back down as slowly as it
 // rose, the machines below still running until it reaches them.
 //    always: shafts of light breathing over the front, glitter falling, star flares off the gold
 //    1s gold light sweeps the marble
 //    1.5s the lower cherubs tip their urns     2.5s the angel's halo flares and her beam brightens
 //    3.2s jets rise out of the basin
-//    5.2s the gargoyles on the ledges by the fountain fire at 5.2 / 6 into the bowl, sweeping and ducking     5.5s the inner jets     4.5–14s the camera climbs to the top
+//    5.2s the gargoyles on the ledges by the fountain fire at 5.2 / 6 into the bowl, sweeping and ducking     5.5s the inner jets     3–12.5s the camera climbs to the top
 //    6–7.5s the censer swings wider across the curtain     7.5s the demons' eyes light up
 //    10.5s the herald angels either side of the rose trumpet at it (the left at 10.5, the right at 11.3)
 //    11s the angels sweep, rocking the rose      12.5s the rose's glass lights up
@@ -1860,13 +1860,13 @@ async function renderSoundtrack(events, t0, dur) {
 //    16.4–17.6 the crown shuts off (the heralds, the glass, the glory, the barking gargoyles)
 //    16.8–26.3 the camera sinks back down     24–26.6 everything below winds down as it gets there
 // ============================================================
-const LOOP = 28, T0 = 8; // T0: the world pre-runs this long before the show starts
+const LOOP = 27, T0 = 8; // T0: the world pre-runs this long before the show starts
 const ramp = (u, a0, a1, b0, b1) => clamp(Math.min((u - a0) / (a1 - a0), (b1 - u) / (b1 - b0)), 0, 1); // 0 → 1 over a0..a1, 1 → 0 over b0..b1
 const ease = k => k * k * (3 - 2 * k);
 const SHOW = { u: 0, glint: -1, halo: 0, evil: 0, glass: 0, glory: 0, cam: 0 };
 function direct(t) {
   const u = SHOW.u = mod(t - T0, LOOP);
-  SHOW.cam = u < 4.5 ? 0 : u < 14 ? ease((u - 4.5) / 9.5) : u < 16.8 ? 1 : u < 26.3 ? 1 - ease((u - 16.8) / 9.5) : 0; // up and down alike
+  SHOW.cam = u < 3 ? 0 : u < 12.5 ? ease((u - 3) / 9.5) : u < 16.8 ? 1 : u < 26.3 ? 1 - ease((u - 16.8) / 9.5) : 0; // up and down alike
   SHOW.glint = u > 1 && u < 2 ? (u - 1) * 1400 - 40 : u > 14.8 && u < 15.8 ? (u - 14.8) * 1400 - 40 : -1;
   SHOW.halo = ramp(u, 2.5, 3, 5, 6);
   SHOW.evil = ramp(u, 7.5, 8.2, 24.4, 25.4) * (.75 + .25 * Math.sin(u * 5));
