@@ -1609,16 +1609,18 @@ layer('water', { draw(t) {
     drawStream(s, t, i0, i1, true);
   }
   for (const s of streams) drawStream(s, t, 0, s.nd, false);
-  // every so often a fleck of gold rides down the water, twinkling as it goes
-  const gold = .02 + .04 * Math.max(0, Math.sin(t * .7));
+  // every so often a fleck of gold rides down the water, flaring into a little star as it goes
+  const gold = .04 + .05 * Math.max(0, Math.sin(t * .7));
   for (const s of streams) for (let i = 0, last = null; i < s.nd; i++) {
     const v = (s.tau[i] - t * SPEED) / 10, cell = Math.floor(v);
     if (cell === last || fract(v) > .3 || h2(cell, s.seed * 31 + 7) > gold) continue;
     last = cell;
     const x = s.xs[i], y = s.ys[i], k = Math.sin(fract(v) / .3 * Math.PI);
     if (y < vy0 || y >= vy1) continue;
-    mix(x, y, C.goldLt, .5 + .5 * k);
-    if (k > .4) for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) mix(x + dx, y + dy, C.gold, (k - .4) * 1.4);
+    mix(x, y, k > .6 ? C.white : C.goldLt, .6 + .4 * k);
+    if (k > .3) for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) mix(x + dx, y + dy, C.gold, (k - .3) * 1.4);
+    if (k > .3) for (const [dx, dy] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) mix(x + dx, y + dy, C.goldDk, (k - .3) * .8);
+    if (k > .75) for (const [dx, dy] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) mix(x + dx, y + dy, C.gold, (k - .75) * 3);
   }
 } });
 
